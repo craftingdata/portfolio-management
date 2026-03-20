@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from app.models.schemas import OptimizeRequest, OptimizeResponse, PortfolioResult
+from app.models.schemas import OptimizeRequest, OptimizeResponse
 from app.services.data_service import get_market_data
 from app.services.optimization import run_all_models
 from app.services.ranking import rank_portfolios

@@ -344,6 +344,15 @@ def run_all_models(
 
     results = {}
 
+    _canonical_names = {
+        minimum_variance: "MinimumVariance",
+        maximum_return: "MaximumReturn",
+        max_sharpe_ratio: "MaxSharpeRatio",
+        mean_variance: "MeanVariance",
+        equal_weight: "EqualWeight",
+        risk_parity: "RiskParity",
+    }
+
     for model_fn, kwargs in [
         (minimum_variance, {"mu": mu, "sigma": sigma, "risk_free_rate": risk_free_rate}),
         (maximum_return, {"mu": mu, "sigma": sigma, "risk_level": risk_level, "risk_free_rate": risk_free_rate}),
@@ -359,7 +368,7 @@ def run_all_models(
             logger.error(f"Model {model_fn.__name__} failed: {e}")
             w = np.ones(len(mu)) / len(mu)
             er, erk, sr = compute_metrics(w, mu, sigma, risk_free_rate)
-            name = model_fn.__name__.replace("_", "").title()
+            name = _canonical_names[model_fn]
             results[name] = {
                 "model_name": name,
                 "weights": w,

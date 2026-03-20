@@ -1,5 +1,4 @@
-import numpy as np
-from typing import Dict, List
+from typing import List
 from app.models.schemas import PortfolioResult
 
 MODEL_DESCRIPTIONS_DEFAULT = {
@@ -97,7 +96,7 @@ def rank_portfolios(
     sorted_models = sorted(model_scores.keys(), key=lambda m: model_scores[m], reverse=True)
 
     ranked = []
-    for rank_idx, model_name in enumerate(sorted_models, start=1):
+    for model_name in sorted_models:
         if model_name not in portfolio_results:
             continue
         result = portfolio_results[model_name]
@@ -115,7 +114,7 @@ def rank_portfolios(
 
         ranked.append(
             PortfolioResult(
-                rank=rank_idx,
+                rank=len(ranked) + 1,
                 model_name=model_name,
                 model_description=description,
                 weights=weights_dict,
