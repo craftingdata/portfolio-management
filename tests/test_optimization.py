@@ -15,7 +15,7 @@ from app.services.optimization import (
 @pytest.fixture
 def synthetic_data():
     """Generate reproducible synthetic market data for testing."""
-    np.random.seed(123)
+    np.random.seed(42)
     n = 5
     tickers = ["AAPL", "MSFT", "GOOGL", "JPM", "SPY"]
     mu = np.array([0.12, 0.11, 0.10, 0.09, 0.08])
