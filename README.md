@@ -6,23 +6,23 @@ A Python portfolio optimization system using SCIP (via [PySCIPOpt](https://githu
 
 The system implements six portfolio optimization techniques based on the [Gurobi Finance modeling notebooks](https://gurobi-finance.readthedocs.io/en/latest/modeling_notebooks.html), re-implemented using the open-source SCIP solver:
 
-| Model | Description | Best For |
-|---|---|---|
-| **MinimumVariance** | Minimizes portfolio variance (risk). Solves `min xᵀΣx` s.t. `Σxᵢ=1, xᵢ≥0`. | Conservative investors, short horizons |
-| **MaximumReturn** | Maximizes expected return within a risk budget. Solves `max μᵀx` s.t. `xᵀΣx ≤ σ²_max`. | Aggressive investors, long horizons |
-| **MaxSharpeRatio** | Maximizes risk-adjusted return (Sharpe ratio / tangency portfolio). Uses parametric sweep with SCIP + scipy refinement. | Balanced risk/return |
-| **MeanVariance** | Classic Markowitz mean-variance optimization. Minimizes variance subject to a target return derived from risk/horizon. | Moderate investors |
-| **EqualWeight** | Simple 1/n equal allocation. Robust, no optimization required. | High uncertainty, very short horizons |
-| **RiskParity** | Equalizes risk contributions from each asset. Solved via scipy SLSQP. | Balanced diversification |
+| Model               | Description                                                                                                             | Best For                               |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| **MinimumVariance** | Minimizes portfolio variance (risk). Solves `min xᵀΣx` s.t. `Σxᵢ=1, xᵢ≥0`.                                              | Conservative investors, short horizons |
+| **MaximumReturn**   | Maximizes expected return within a risk budget. Solves `max μᵀx` s.t. `xᵀΣx ≤ σ²_max`.                                  | Aggressive investors, long horizons    |
+| **MaxSharpeRatio**  | Maximizes risk-adjusted return (Sharpe ratio / tangency portfolio). Uses parametric sweep with SCIP + scipy refinement. | Balanced risk/return                   |
+| **MeanVariance**    | Classic Markowitz mean-variance optimization. Minimizes variance subject to a target return derived from risk/horizon.  | Moderate investors                     |
+| **EqualWeight**     | Simple 1/n equal allocation. Robust, no optimization required.                                                          | High uncertainty, very short horizons  |
+| **RiskParity**      | Equalizes risk contributions from each asset. Solved via scipy SLSQP.                                                   | Balanced diversification               |
 
 ## API
 
 ### Endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Health check |
-| `GET` | `/models` | List all available optimization models |
+| Method | Path        | Description                              |
+| ------ | ----------- | ---------------------------------------- |
+| `GET`  | `/health`   | Health check                             |
+| `GET`  | `/models`   | List all available optimization models   |
 | `POST` | `/optimize` | Run all models and return ranked results |
 
 ### Request: `POST /optimize`
@@ -39,11 +39,11 @@ The system implements six portfolio optimization techniques based on the [Gurobi
 
 **Field descriptions:**
 
-- `total_amount` *(required)*: Total investment in dollars (must be > 0).
-- `risk_tolerance` *(required)*: Either a float `0–10` or one of `"low"` (→2), `"medium"` (→5), `"high"` (→8).
-- `investment_horizon` *(required)*: Number of months as an integer, or `"short"` (→6 months), `"medium"` (→24 months), `"long"` (→60 months).
-- `tickers` *(optional)*: List of ticker symbols. Defaults to a diversified set of 15 assets (US stocks, ETFs, bonds, gold).
-- `risk_free_rate` *(optional)*: Annual risk-free rate for Sharpe ratio calculation. Defaults to `0.04` (4%).
+- `total_amount` _(required)_: Total investment in dollars (must be > 0).
+- `risk_tolerance` _(required)_: Either a float `0–10` or one of `"low"` (→2), `"medium"` (→5), `"high"` (→8).
+- `investment_horizon` _(required)_: Number of months as an integer, or `"short"` (→6 months), `"medium"` (→24 months), `"long"` (→60 months).
+- `tickers` _(optional)_: List of ticker symbols. Defaults to a diversified set of 15 assets (US stocks, ETFs, bonds, gold).
+- `risk_free_rate` _(optional)_: Annual risk-free rate for Sharpe ratio calculation. Defaults to `0.04` (4%).
 
 ### Response
 
@@ -93,13 +93,13 @@ Default tickers: `AAPL, MSFT, GOOGL, AMZN, META, TSLA, JPM, JNJ, PG, KO, SPY, QQ
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ## Running the Server
 
 ```bash
-uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload
 ```
 
 The API will be available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
@@ -107,7 +107,7 @@ The API will be available at `http://localhost:8000`. Interactive docs at `http:
 ## Running Tests
 
 ```bash
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 ## Project Structure

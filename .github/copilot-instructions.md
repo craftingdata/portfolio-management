@@ -11,7 +11,7 @@ These instructions keep Copilot changes aligned with this repository's actual sh
 ## Working assumptions
 
 - The codebase is Python-only in its current form.
-- Dependency management is driven by `requirements.txt`, not `uv`, Poetry, or a monorepo toolchain.
+- Dependency management is driven by `pyproject.toml` and `uv.lock`.
 - Tests live under `tests/` and are run with `pytest`.
 
 ## Repo structure pointers
@@ -31,8 +31,8 @@ These instructions keep Copilot changes aligned with this repository's actual sh
 ## Verification
 
 - Default local verification is:
-  - `python -m pip install -r requirements.txt`
-  - `python -m pytest tests -q`
+  - `uv sync`
+  - `uv run pytest tests -q`
 - For focused changes, run the narrowest relevant pytest target first.
 
 ## Do not do

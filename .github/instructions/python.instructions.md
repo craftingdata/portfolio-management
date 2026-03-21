@@ -27,5 +27,6 @@ applyTo: "**/*.py"
 
 ## Tooling
 
-- This repo does not currently define `pyproject.toml`, `uv.lock`, or `ruff` configuration.
+- This repo uses `pyproject.toml` and `uv.lock` for package management.
+- Keep dependency changes in `pyproject.toml` and re-lock with `uv lock` or `uv add` as appropriate.
 - Use the existing lightweight workflow unless the user asks to introduce new tooling.

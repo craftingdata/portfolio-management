@@ -8,8 +8,8 @@ applyTo: "**/*.py,**/test_*,**/conftest*"
 ## Default Validation Loop
 
 - Prefer running a fast local loop before considering work complete:
-  - `python -m pip install -r requirements.txt`
-  - `python -m pytest <focused target>`
+  - `uv sync`
+  - `uv run pytest <focused target>`
 
 ## Tests
 
