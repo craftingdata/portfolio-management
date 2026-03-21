@@ -264,7 +264,12 @@ Current notable omissions, based on repo code, are:
 - cost-aware optimization
 - market-impact modeling
 - metadata-driven sector constraints
-- output-driven ranking
+
+Review finding:
+
+- output-driven ranking should no longer be treated as an omission
+- the current repo already ranks using realized returns, risk, Sharpe ratio, and efficient-frontier context in `app/services/ranking.py`
+- the remaining ranking work is extension, not initial implementation
 
 ### Step 3: Check Data Prerequisites
 
@@ -344,8 +349,8 @@ These should not be treated as pure `optimization.py` tasks because the real blo
 These require a broader addition across schema, orchestration, and solver layers:
 
 - rebalancing with transaction costs
-  - blocker type: missing holdings inputs, missing trade variables, missing cost parameters
-  - current gap: no current-holdings fields in `OptimizeRequest`; no rebalance path in the optimizer
+  - blocker type: missing trade variables and cost parameters, plus richer rebalance orchestration
+  - current gap: `OptimizeRequest` already has `current_weights`, and the optimizer already has turnover-constrained rebalancing, but there is still no explicit buy/sell formulation with transaction costs
 - transaction-cost-aware investing
   - blocker type: missing cost parameters plus missing trade formulation
   - current gap: current optimizer allocates end-state weights only; it does not model buys and sells explicitly
@@ -358,6 +363,59 @@ These require a broader addition across schema, orchestration, and solver layers
 - output-driven ranking
   - blocker type: partially improved and now implemented for current outputs
   - why: ranking now uses realized returns, risk, Sharpe ratio, and frontier context, but it can still be extended further once transaction-cost and factor outputs exist
+
+## Review Findings Incorporated
+
+The current review of `base.md` against the repo code produced these corrections:
+
+- output-driven ranking is implemented and should not be listed as a current omission
+- leverage-by-short-selling, leverage-by-borrowing, and turnover-constrained optimization are implemented end-to-end and covered by tests
+- `OptimizeRequest` already includes `current_weights`, `max_turnover`, `max_gross_exposure`, `max_short_exposure`, and `max_cash_borrow`
+- the real remaining rebalancing gap is transaction-cost-aware rebalancing, not basic turnover-aware rebalancing
+
+## Are The Remaining Gaps Gated?
+
+Not all remaining gaps are ready for direct implementation. Some are still gated by missing information, missing upstream data, or missing product semantics.
+
+### Ready Or Mostly Ready
+
+These are the least gated remaining areas:
+
+- continuous-model cleanup and orchestration cleanup
+  - mostly an internal refactor
+  - no new external data source is required
+- stronger validation around the already-implemented leverage and turnover features
+  - request validation, holdings normalization, and calibration can be improved now
+  - no new data source is required
+
+### Gated By Missing Information Or Data
+
+These are not ready for clean implementation without defining additional inputs first:
+
+- factor models
+  - gated by missing factor exposure matrix, factor covariance, and specific-risk inputs
+- sector allocation constraints
+  - gated by missing sector metadata retrieval in the provider layer
+- round-lot constraints
+  - gated by missing lot-size semantics and current-price-to-unit conversion rules
+
+### Gated By Missing Trading Semantics
+
+These are not ready as pure solver tasks because the contract and modeling inputs are still incomplete:
+
+- transaction-cost-aware optimization
+  - needs buy/sell variables, cost parameters, and explicit cost semantics
+- rebalancing with transaction costs
+  - needs a trade model built from current holdings plus a cost-aware budget equation
+- market impact
+  - needs impact coefficients or a documented proxy model tied to trade size and liquidity
+
+### Practical Answer
+
+The remaining gaps are not all ready for implementation.
+
+- ready now: cleanup and hardening work around already-implemented continuous, leverage, and turnover models
+- gated by missing information or upstream inputs: factor models, sector constraints, round lots, transaction costs, and market impact
 
 ## Which Gates Can Be Removed By FMP Or FinanceToolkit
 
@@ -425,7 +483,7 @@ This section is the condensed planning view for another model.
   - still remaining because the repo does not yet define lot-size semantics or unit-level optimization inputs
 - rebalancing
   - reduced because FinanceToolkit can analyze transaction-based portfolios and FMP can supply current pricing
-  - still remaining because the API schema has no holdings inputs and the optimizer has no rebalance path
+  - still remaining because the repo lacks an explicit trade-based rebalance formulation with transaction costs, even though `current_weights` and turnover-constrained optimization now exist
 - transaction costs and market impact
   - reduced because FMP provides price, volume, float, and liquidity-style inputs
   - still remaining because the optimizer does not yet model buy/sell variables, cost parameters, or impact terms
@@ -485,7 +543,7 @@ The pointers are not intended to fabricate missing business inputs. For example:
 - factor models still need a source for factor exposures and specific risk
 - sector allocation still needs sector metadata retrieval in the provider layer
 - round lots still need lot-size semantics
-- rebalancing still needs holdings inputs added to the request model
+- transaction-cost-aware rebalancing still needs explicit trade variables and cost semantics beyond the existing `current_weights` input
 
 That means implementation is not gated by lack of discovery pointers, but some techniques remain gated by real upstream omissions in the system design.
 
@@ -757,6 +815,475 @@ This section defines what data must exist before each notebook family can be imp
 - fixed charge assumptions
 - proportional cost rates
 - optional market impact parameters
+
+## Source Map For Remaining Gaps
+
+This section identifies, for each remaining notebook family, where the formulation comes from, where the required data would come from in this repo, how that data should be obtained, and which decisions are still unresolved.
+
+### Current Live Data Source In Repo
+
+What exists today:
+
+- historical prices come from Financial Modeling Prep (FMP) in `app/services/data_service.py`
+- the FMP API key is retrieved from Azure Key Vault using `DefaultAzureCredential`
+- the default vault and secret names are controlled by `AZURE_KEYVAULT_NAME` and `FMP_API_SECRET_NAME`
+- raw prices are fetched from FMP `historical-price-full/{ticker}`
+- expected returns and covariance are derived locally in `app/services/estimation.py` from the fetched price history
+- optional FinanceToolkit diagnostics are computed only when an FMP API key is available
+
+How to obtain it:
+
+1. ensure Azure authentication works for the runtime using `DefaultAzureCredential`
+2. store the FMP API key in Azure Key Vault under the configured secret name
+3. set `AZURE_KEYVAULT_NAME` and `FMP_API_SECRET_NAME` if the defaults are not correct
+4. call the existing market-data path through `get_market_data(...)`
+
+What this means:
+
+- the repo already has a working source for price history
+- the repo does not yet have first-class retrieval for sector metadata, factor exposures, liquidity proxies, lot sizes, or transaction-cost inputs
+- those inputs must be added explicitly to `app/services/data_service.py` or another provider module before solver work can be considered complete
+
+### FMP Endpoint Map For Remaining Provider Work
+
+The current repo uses the legacy FMP v3-style historical endpoint in `app/services/data_service.py`. The current FMP docs expose stable endpoints that should be used as the implementation reference for provider expansion.
+
+Historical prices and volume:
+
+- historical end-of-day price and volume: `https://financialmodelingprep.com/stable/historical-price-eod/full?symbol=AAPL`
+- lighter historical chart variant: `https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=AAPL`
+
+Latest prices and live quote fields:
+
+- real-time quote: `https://financialmodelingprep.com/stable/quote?symbol=AAPL`
+- short quote: `https://financialmodelingprep.com/stable/quote-short?symbol=AAPL`
+- batch quote for multiple symbols: `https://financialmodelingprep.com/stable/batch-quote?symbols=AAPL,MSFT,GOOG`
+
+Sector and company metadata:
+
+- company profile with sector and industry fields: `https://financialmodelingprep.com/stable/profile?symbol=AAPL`
+- available sectors list for normalization: `https://financialmodelingprep.com/stable/available-sectors`
+- available industries list for normalization: `https://financialmodelingprep.com/stable/available-industries`
+- bulk profiles if provider throughput becomes a problem: `https://financialmodelingprep.com/stable/profile-bulk?part=0`
+
+Liquidity and related fields:
+
+- historical price and volume endpoint above is the primary source for computing average daily dollar volume
+- real-time quote endpoints also expose volume fields for latest snapshots
+- shares float and liquidity metadata: `https://financialmodelingprep.com/stable/shares-float?symbol=AAPL`
+- top traded stocks reference endpoint: `https://financialmodelingprep.com/stable/most-actives`
+
+ETF-specific supporting endpoints:
+
+- ETF information: `https://financialmodelingprep.com/stable/etf/info?symbol=SPY`
+- ETF sector weightings: `https://financialmodelingprep.com/stable/etf/sector-weightings?symbol=SPY`
+- ETF holdings: `https://financialmodelingprep.com/stable/etf/holdings?symbol=SPY`
+
+Implementation note:
+
+- for this repo, sector constraints should use `profile?symbol=` as the first metadata source for operating companies
+- average daily dollar volume should be computed from historical end-of-day close and volume, rather than inferred from only quote snapshots
+- latest-price support should come from `quote?symbol=` or `batch-quote?symbols=` rather than reusing a historical endpoint for execution-time values
+
+### Factor Models
+
+Formulation source:
+
+- Gurobi factor model notebooks
+- portfolio-theory formulation: $\Sigma = BFB^\top + D$
+
+Required data:
+
+- factor exposure matrix per asset
+- factor covariance matrix
+- specific risk per asset
+
+Likely data source:
+
+- not currently sourced in repo
+- possible external sources include FMP fundamentals and statement data, FinanceToolkit-derived factors, or a separate factor dataset/provider
+
+How to obtain it:
+
+1. choose the factor family first: market-only, style factors, or sector plus style factors
+2. decide whether exposures are vendor-supplied or estimated in-house from historical data and fundamentals
+3. add a provider layer that returns `B`, `F`, and `D` in a stable schema
+4. add estimation tests that verify dimensions, symmetry, and positive semidefiniteness where required
+
+Policy chosen:
+
+- first factor family is market-only
+- factor exposures should be estimated in-house initially
+- use daily inputs with a weekly refresh cadence for the first factor-model implementation
+
+Decisions that still remain:
+
+- none for the initial implementation contract
+
+Implementation status:
+
+- gated by missing upstream factor data and estimation implementation
+
+### Sector Allocation Constraints
+
+Formulation source:
+
+- Gurobi sector allocation notebook patterns
+- linear aggregation constraints of the form $\sum_{i \in s} x_i \leq u_s$
+
+Required data:
+
+- sector classification per ticker
+- optionally industry and sub-industry later
+
+Likely data source:
+
+- FMP company profile or similar metadata endpoint
+
+How to obtain it:
+
+1. extend `app/services/data_service.py` with a metadata fetch path for ticker classifications
+2. normalize provider sector labels into a stable internal vocabulary
+3. cache the metadata alongside price retrieval or in a separate provider helper
+4. expose sector-bound inputs in `app/models/schemas.py`
+
+Policy chosen:
+
+- first version supports sector-level constraints only
+- ETFs should be excluded from sector-constrained runs
+
+Decisions that still remain:
+
+- none for the initial implementation contract
+
+Implementation status:
+
+- partially gated by missing metadata retrieval and normalization implementation
+
+### Cardinality And Minimum Buy-In
+
+Formulation source:
+
+- Gurobi minimum buy-in and cardinality notebooks
+- mixed-integer formulations using binary open-position variables
+
+Required data:
+
+- minimum and maximum position thresholds
+- optional per-asset buy-in thresholds if not global
+
+Likely data source:
+
+- mostly request-schema inputs rather than vendor data
+- current prices may also be needed if thresholds are defined in dollars rather than weights
+
+How to obtain it:
+
+1. add request fields for max positions, minimum position size, and optional per-asset overrides
+2. if thresholds are dollar-based, reuse latest-price retrieval from the provider layer
+3. implement SCIP-first binary formulations in `app/services/optimization.py`
+
+Policy chosen:
+
+- thresholds should be expressed in portfolio weights first
+- minimum buy-in applies to newly opened positions only
+- if SCIP is unavailable for a mixed-integer request, the API should reject the request rather than silently relax it
+
+Decisions that still remain:
+
+- none for the initial implementation contract
+
+Implementation status:
+
+- ready for implementation once request fields and SCIP-first solver wiring are added
+
+### Round Lots
+
+Formulation source:
+
+- Gurobi round-lot notebook patterns using integer quantity variables
+
+Required data:
+
+- latest price per asset
+- lot size or minimum tradable unit per asset
+- portfolio budget or target capital
+
+Likely data source:
+
+- latest price can come from FMP
+- lot size may need a repo-managed assumption layer because standard equities often trade in single shares while some markets/products have different lot semantics
+
+How to obtain it:
+
+1. add a latest-price retrieval path if the existing historical fetch is not sufficient for execution-time sizing
+2. define where lot-size metadata lives: static config, provider metadata, or request input
+3. extend response models to return share or lot counts in addition to weights if integer trading is requested
+
+Policy chosen:
+
+- U.S. equities default to one-share lots in the first version
+- round-lot models should solve directly in integer units or lots, not through a weight-optimization step followed by a rounding post-pass
+
+Decisions that still remain:
+
+- none for the initial implementation contract
+
+Implementation status:
+
+- ready for implementation once latest-price retrieval, lot metadata, and integer result packaging are added
+
+### Transaction-Cost-Aware Rebalancing
+
+Formulation source:
+
+- Gurobi transaction-cost and rebalancing notebooks
+- buy/sell decomposition with budget adjustments for costs
+
+Required data:
+
+- current holdings or current weights
+- latest prices
+- transaction cost model parameters: fixed charges, proportional fees, spreads
+
+Likely data source:
+
+- current holdings already have a partial path via `current_weights` in the request schema
+- latest prices can come from FMP
+- transaction cost parameters are not available from the current provider layer and will likely start as request inputs or config defaults
+
+How to obtain it:
+
+1. keep using or extend `current_weights` for rebalance starting state
+2. add latest-price retrieval if the formulation moves from weight-only to trade-size-aware execution
+3. add explicit transaction-cost fields to `app/models/schemas.py`
+4. model buy and sell variables separately in `app/services/optimization.py`
+
+Policy chosen:
+
+- first version uses a global proportional fee only
+- fixed per-trade fees are deferred from the first version
+- turnover-constrained and transaction-cost-aware rebalancing should remain separate model families
+
+Decisions that still remain:
+
+- none for the initial implementation contract
+
+Implementation status:
+
+- ready for implementation once cost inputs are added to the request contract and wired into the optimizer
+
+### Market Impact
+
+Formulation source:
+
+- Gurobi market impact notebook patterns
+- usually a penalty or constraint tied to trade size relative to liquidity
+
+Required data:
+
+- trade size
+- recent volume or liquidity proxy
+- impact coefficients or calibration assumptions
+
+Likely data source:
+
+- recent price and volume may be obtainable from FMP
+- impact coefficients are not available in repo and likely need to be policy-driven assumptions or research inputs
+
+How to obtain it:
+
+1. extend provider retrieval to include recent volume or dollar-volume metrics
+2. choose a simple first-pass impact model, such as linear or square-root penalty
+3. expose calibration parameters in config or request schema
+4. add tests that verify larger trades are penalized more heavily than smaller trades
+
+Policy chosen:
+
+- first version uses a linear market-impact penalty
+- market impact is meant to approximate execution cost first
+- liquidity should be normalized using average daily dollar volume
+
+Decisions that still remain:
+
+- none for the initial implementation contract
+
+Implementation status:
+
+- gated by missing liquidity-data retrieval and provider-to-optimizer wiring
+
+### Summary Of What Is Data-Sourced Versus Decision-Gated
+
+Data source already live in repo:
+
+- historical price history from FMP
+- locally estimated returns and covariance
+- optional FinanceToolkit risk diagnostics
+
+Can likely be obtained with moderate provider extension:
+
+- sector metadata from FMP-style company profile endpoints
+- latest prices from existing or adjacent FMP endpoints
+- recent volume and liquidity proxies from FMP
+
+Still requires product or quant decisions before coding:
+
+- none for the initial implementation contract
+
+## Resolved Policy Decisions
+
+The following implementation policies are now fixed unless explicitly changed later.
+
+### Factor Models
+
+- start with a market-only factor model
+- estimate exposures in-house rather than relying on a vendor-supplied factor feed
+- use daily inputs with a weekly refresh cadence for the first factor-model implementation
+
+Why this is important:
+
+- market-only is the narrowest factor model that still changes the risk model architecture, so it lets the repo add factor infrastructure without first committing to a full style-factor research program
+- estimating exposures in-house keeps the first implementation independent of a specialized vendor feed and avoids binding the API contract to an external factor taxonomy too early
+
+Implications if changed later:
+
+- moving from market-only to style or multi-factor models will expand the data contract from one exposure vector to a full exposure matrix and will likely require changes in estimation helpers, validation, and tests
+- switching from in-house estimation to vendor-supplied exposures would change the provider layer and may change output comparability if the vendor uses a different factor definition or refresh cadence
+- moving from weekly refresh to monthly refresh would reduce churn but make the factor model slower to react; moving to daily refresh would increase responsiveness at the cost of noisier estimates and more frequent cache invalidation
+
+### Sector Constraints
+
+- support sector-level constraints first
+- exclude ETFs from sector-constrained runs
+- if a ticker has missing or unstable sector metadata, exclude that ticker from the sector-constrained run rather than rejecting the entire request
+
+Why this is important:
+
+- sector-level bounds are easier to explain and validate than industry-level bounds, and they match the first likely user need: cap broad concentration risk
+- excluding ETFs avoids false precision because many ETFs do not map cleanly into a single operating sector
+
+Implications if changed later:
+
+- adding industry-level constraints later will require more detailed metadata normalization and more edge-case handling for inconsistent provider labels
+- allowing ETFs into sector-constrained runs will require an explicit classification rule, such as provider label, look-through holdings, or uncategorized treatment, and each choice changes feasibility and exposure totals
+- changing from asset exclusion to hard rejection would improve strictness but make sector-constrained runs fail more often because of provider metadata gaps; changing to an uncategorized bucket would preserve more assets but require additional constraint semantics
+
+### Cardinality And Minimum Buy-In
+
+- express thresholds in portfolio weights first
+- apply minimum buy-in only to newly opened positions
+- reject mixed-integer requests when SCIP is unavailable rather than relaxing them silently
+
+Why this is important:
+
+- weights keep the API aligned with the rest of the current optimizer, which already operates primarily in allocation space rather than dollars or shares
+- applying buy-in only to newly opened positions avoids forcing legacy holdings to be liquidated just because they fall below the buy-in threshold
+- rejecting requests when SCIP is unavailable prevents the API from returning a materially different optimization problem than the caller requested
+
+Implications if changed later:
+
+- changing thresholds from weights to dollars or shares would require latest-price support, new request fields, and revised validation rules
+- applying buy-in to all non-zero positions would materially change rebalance behavior and could force additional turnover
+- allowing relaxed fallbacks would require response metadata that clearly tells the caller a different problem was solved
+
+### Round Lots
+
+- default U.S. equities to one-share lots in the first version
+- do not allow fractional trading in the first version
+- solve round-lot portfolios directly in integer units or lots, not by optimizing continuous weights and rounding afterward
+
+Why this is important:
+
+- one-share lots are the least opinionated default for U.S. equities and avoid inventing a special lot schedule where one may not exist
+- this keeps the first integer-trading model simple enough to validate against continuous-weight outputs
+- solving directly in integer units preserves the integrity of the optimization problem, so the returned portfolio is actually feasible under the lot constraints rather than only approximately feasible after rounding
+
+Implications if changed later:
+
+- introducing market-specific lot sizes will require per-asset metadata and may reduce feasibility for small portfolios
+- allowing fractional shares would weaken or remove the need for some integer constraints and may change whether round-lot optimization should exist as a distinct model family
+- switching to a rounding post-pass later would simplify implementation but could create portfolios that violate budget, diversification, or cardinality intent after rounding and would weaken testability against the exact solver formulation
+
+### Transaction Costs
+
+- first version uses a global proportional fee only
+- do not include fixed per-trade fees in the first version
+- keep turnover-constrained and transaction-cost-aware rebalancing as separate model families
+- use repo defaults first for transaction-cost and market-impact calibration, with user review and later override support if needed
+- anchor transaction-cost defaults to Interactive Brokers pricing rather than an arbitrary internal fee assumption
+- use Interactive Brokers Fixed pricing for the U.S. equity market as the v1 broker baseline
+- simplify the IBKR U.S. Fixed schedule into a default one-way effective trading-cost rate of 10 bps for optimization purposes
+
+Why this is important:
+
+- a single proportional fee is the simplest cost model that still changes portfolio selection behavior in a meaningful way
+- omitting fixed fees keeps the first version continuous or near-continuous where possible instead of immediately forcing additional binary complexity
+- keeping turnover and transaction-cost models separate makes it easier to compare their behavior and test them independently
+- using Interactive Brokers as the baseline ties transaction-cost assumptions to a real broker schedule instead of an invented placeholder
+- using a 10 bps one-way default keeps the model in a range that still allows a growth-oriented portfolio to trade when expected upside is meaningful, while remaining conservative enough to avoid free-trading assumptions
+
+Implications if changed later:
+
+- adding per-asset or broker-specific costs will expand the request contract and complicate calibration and testing
+- adding fixed fees will push the model further into mixed-integer territory and may increase solve time materially
+- merging turnover and transaction-cost rebalancing into one configurable family would reduce API surface area but increase model branching and validation complexity
+- moving from repo defaults to required per-request inputs would give callers more control but increase schema complexity and usage friction; moving to defaults plus optional overrides would be a reasonable second step once calibration stabilizes
+- changing away from an IBKR baseline later would change backtest comparability and may require revisiting default cost levels across markets and account types
+- changing the default rate materially above 10 bps will make the optimizer trade less and prefer lower-turnover portfolios; changing it materially below 10 bps will make the optimizer more willing to chase forecast return at the cost of more turnover
+
+Why these additional decisions are important:
+
+- weekly factor refresh is a middle ground: it avoids daily churn in factor estimates while staying more responsive than monthly recomputation
+- excluding only assets with missing sector metadata keeps sector-constrained runs usable without pretending the missing classification is reliable
+- disallowing fractional trading preserves the meaning of round-lot and integer-trading models instead of collapsing them back toward continuous allocation
+- repo-default calibration keeps the first implementation deterministic and avoids forcing callers to invent transaction-cost and impact numbers before the product has validated defaults
+
+### Market Impact
+
+- first version uses a linear penalty
+- treat market impact primarily as an execution-cost approximation
+- use average daily dollar volume as the first liquidity proxy
+- calibrate the v1 market-impact model for a growth investor: a trade equal to 10% of average daily dollar volume should add roughly 25 bps of impact cost
+- implement that as a linear coefficient of 0.025 in the penalty term when impact is modeled as `coefficient * (trade_notional / ADV)`
+- use a default ADV floor of $5,000,000 when computing impact so very low-liquidity names do not create unstable penalties from noisy data
+
+Why this is important:
+
+- a linear penalty is easier to reason about, calibrate, and debug than more nonlinear impact functions
+- treating impact as execution cost keeps the first objective economically interpretable instead of mixing cost and abstract liquidity-risk controls
+- average daily dollar volume is a more practical scaling measure than share volume when assets have very different prices
+- calibrating to 25 bps at 10% ADV is growth-oriented rather than defensive: it still discourages oversized trades in thin names, but it does not suppress moderate trading in liquid growth names
+
+Implications if changed later:
+
+- switching to a square-root or other nonlinear impact model may require different solver treatment, different calibration data, and different user expectations around sensitivity
+- treating impact as a risk-control constraint instead of a cost term would change both the formulation and how results are explained to users
+- changing the liquidity proxy would alter calibration values and may make historical comparisons between runs inconsistent
+- increasing the impact coefficient above this default will bias the optimizer more strongly toward mega-cap liquidity and lower turnover; decreasing it will make the optimizer more willing to trade smaller or less liquid names
+- raising the ADV floor will make the model more forgiving to thinly traded names; lowering it will make the penalty more sensitive to small-cap liquidity conditions
+
+### Calibration Defaults For Initial Implementation
+
+These defaults are intended to remove gating for implementation. They are not meant to be a final execution model.
+
+Transaction-cost default:
+
+- broker baseline: Interactive Brokers Fixed, U.S. equities
+- optimizer default: 10 bps one-way effective trading cost
+- interpretation: a growth-oriented but still realistic default that allows trading when conviction is strong
+
+Market-impact defaults:
+
+- penalty form: linear in trade notional divided by average daily dollar volume
+- coefficient: `0.025`
+- interpretation: approximately 25 bps impact at 10% ADV, 12.5 bps at 5% ADV, and 50 bps at 20% ADV
+- ADV floor: `$5,000,000`
+
+Why these defaults fit a growth investor:
+
+- they allow meaningful rebalancing when expected return improves, instead of locking the optimizer into ultra-low-turnover behavior
+- they still penalize aggressive trading into thin liquidity, so the model does not behave like execution is frictionless
+- they should favor liquid growth names without forcing the solution entirely into the largest-cap names
 
 ## Solver Guidance
 
