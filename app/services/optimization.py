@@ -8,8 +8,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TRANSACTION_COST_MODEL = "interactive_brokers_fixed"
 DEFAULT_TRANSACTION_COST_RATE = 0.001
+DEFAULT_TIERED_TRANSACTION_COST_RATE = 0.0005
+DEFAULT_FIXED_TICKET_CHARGE = 1.0
+DEFAULT_MINIMUM_COMMISSION_CHARGE = 0.35
 DEFAULT_MARKET_IMPACT_COEFFICIENT = 0.025
 DEFAULT_IMPACT_ADV_FLOOR = 5_000_000.0
+DEFAULT_MARKET_IMPACT_MODEL = "linear"
+DEFAULT_IMPACT_THRESHOLD_ADV_RATIO = 0.10
+DEFAULT_IMPACT_EXCESS_SLOPE_MULTIPLIER = 2.0
 SECTOR_ALIAS_MAP = {
     "basic_materials": "materials",
     "communication": "communication_services",
@@ -82,23 +88,50 @@ def _resolve_execution_penalties(
     tickers: List[str],
     transaction_cost_model: str,
     transaction_cost_rate: Optional[float],
+    fixed_ticket_charge: Optional[float],
+    minimum_commission_charge: Optional[float],
     per_asset_transaction_costs: Optional[Dict[str, float]],
+    per_asset_fixed_ticket_charges: Optional[Dict[str, float]],
+    per_asset_minimum_commission_charges: Optional[Dict[str, float]],
+    market_impact_model: str,
     market_impact_coefficient: Optional[float],
     per_asset_market_impact_coefficients: Optional[Dict[str, float]],
     average_daily_dollar_volume: Optional[Dict[str, float]],
     total_amount: float,
     impact_adv_floor: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    impact_threshold_adv_ratio: float,
+    impact_excess_slope_multiplier: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if transaction_cost_model in {"interactive_brokers_fixed", "default"}:
         base_transaction_cost_rate = DEFAULT_TRANSACTION_COST_RATE if transaction_cost_rate is None else float(max(transaction_cost_rate, 0.0))
+        base_fixed_ticket_charge = DEFAULT_FIXED_TICKET_CHARGE if fixed_ticket_charge is None else float(max(fixed_ticket_charge, 0.0))
+        base_minimum_commission_charge = float(max(minimum_commission_charge or 0.0, 0.0))
+    elif transaction_cost_model == "interactive_brokers_tiered":
+        base_transaction_cost_rate = DEFAULT_TIERED_TRANSACTION_COST_RATE if transaction_cost_rate is None else float(max(transaction_cost_rate, 0.0))
+        base_fixed_ticket_charge = float(max(fixed_ticket_charge or 0.0, 0.0))
+        base_minimum_commission_charge = DEFAULT_MINIMUM_COMMISSION_CHARGE if minimum_commission_charge is None else float(max(minimum_commission_charge, 0.0))
     else:
         base_transaction_cost_rate = float(max(transaction_cost_rate or 0.0, 0.0))
+        base_fixed_ticket_charge = float(max(fixed_ticket_charge or 0.0, 0.0))
+        base_minimum_commission_charge = float(max(minimum_commission_charge or 0.0, 0.0))
 
     transaction_cost_rates = np.full(len(tickers), base_transaction_cost_rate, dtype=float)
     if per_asset_transaction_costs:
         for index, ticker in enumerate(tickers):
             if ticker in per_asset_transaction_costs:
                 transaction_cost_rates[index] = float(max(per_asset_transaction_costs[ticker], 0.0))
+
+    minimum_commission_charges = np.full(len(tickers), base_minimum_commission_charge, dtype=float)
+    if per_asset_minimum_commission_charges:
+        for index, ticker in enumerate(tickers):
+            if ticker in per_asset_minimum_commission_charges:
+                minimum_commission_charges[index] = float(max(per_asset_minimum_commission_charges[ticker], 0.0))
+
+    fixed_ticket_charges = np.full(len(tickers), base_fixed_ticket_charge, dtype=float)
+    if per_asset_fixed_ticket_charges:
+        for index, ticker in enumerate(tickers):
+            if ticker in per_asset_fixed_ticket_charges:
+                fixed_ticket_charges[index] = float(max(per_asset_fixed_ticket_charges[ticker], 0.0))
 
     base_market_impact = DEFAULT_MARKET_IMPACT_COEFFICIENT if market_impact_coefficient is None else float(max(market_impact_coefficient, 0.0))
     market_impact_rates = np.full(len(tickers), base_market_impact, dtype=float)
@@ -108,13 +141,66 @@ def _resolve_execution_penalties(
                 market_impact_rates[index] = float(max(per_asset_market_impact_coefficients[ticker], 0.0))
 
     impact_penalties = np.zeros(len(tickers), dtype=float)
+    impact_threshold_weights = np.full(len(tickers), np.inf, dtype=float)
+    impact_excess_penalties = np.zeros(len(tickers), dtype=float)
     if average_daily_dollar_volume:
         adv_floor = float(max(impact_adv_floor, 1.0))
+        threshold_ratio = float(max(impact_threshold_adv_ratio, 1e-8))
+        excess_multiplier = float(max(impact_excess_slope_multiplier, 1.0))
         for index, ticker in enumerate(tickers):
             adv = float(max(float(average_daily_dollar_volume.get(ticker, adv_floor)), adv_floor))
             impact_penalties[index] = market_impact_rates[index] * (float(max(total_amount, 1e-8)) / adv)
+            impact_threshold_weights[index] = min(1.0, threshold_ratio * adv / float(max(total_amount, 1e-8)))
+            if market_impact_model == "piecewise_linear":
+                impact_excess_penalties[index] = impact_penalties[index] * (excess_multiplier - 1.0)
 
-    return transaction_cost_rates, market_impact_rates, transaction_cost_rates + impact_penalties
+    fixed_ticket_weight_costs = fixed_ticket_charges / float(max(total_amount, 1e-8))
+    minimum_commission_weight_costs = minimum_commission_charges / float(max(total_amount, 1e-8))
+    return (
+        transaction_cost_rates,
+        minimum_commission_weight_costs,
+        market_impact_rates,
+        impact_penalties,
+        fixed_ticket_weight_costs,
+        impact_threshold_weights,
+        impact_excess_penalties,
+    )
+
+
+def _resolve_lot_unit_bounds(
+    latest_prices: np.ndarray,
+    lot_sizes: np.ndarray,
+    total_amount: float,
+    minimum_lot_units: Optional[np.ndarray],
+    maximum_lot_units: Optional[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    n = len(latest_prices)
+    if minimum_lot_units is None:
+        minimum_units = np.zeros(n, dtype=float)
+    else:
+        minimum_units = np.array(minimum_lot_units, dtype=float)
+        if minimum_units.shape[0] != n:
+            raise ValueError("minimum_lot_units must align with the asset universe")
+        if np.any(minimum_units < 0.0):
+            raise ValueError("minimum_lot_units must be non-negative")
+
+    affordable_upper_bounds = np.floor(float(max(total_amount, 1e-8)) / np.maximum(latest_prices * lot_sizes, 1e-8))
+    if maximum_lot_units is None:
+        maximum_units = affordable_upper_bounds
+    else:
+        maximum_units = np.array(maximum_lot_units, dtype=float)
+        if maximum_units.shape[0] != n:
+            raise ValueError("maximum_lot_units must align with the asset universe")
+        if np.any(maximum_units < 0.0):
+            raise ValueError("maximum_lot_units must be non-negative")
+        maximum_units = np.minimum(maximum_units, affordable_upper_bounds)
+
+    minimum_units = np.floor(minimum_units)
+    maximum_units = np.floor(maximum_units)
+    infeasible = minimum_units > maximum_units
+    minimum_units[infeasible] = 0.0
+    maximum_units[infeasible] = 0.0
+    return minimum_units, maximum_units
 
 
 def _normalized_metadata_token(value: Optional[str]) -> str:
@@ -892,11 +978,18 @@ def run_all_models(
     sector_max_weights: Optional[Dict[str, float]] = None,
     transaction_cost_model: str = DEFAULT_TRANSACTION_COST_MODEL,
     transaction_cost_rate: Optional[float] = None,
+    fixed_ticket_charge: Optional[float] = None,
+    minimum_commission_charge: Optional[float] = None,
     per_asset_transaction_costs: Optional[Dict[str, float]] = None,
+    per_asset_fixed_ticket_charges: Optional[Dict[str, float]] = None,
+    per_asset_minimum_commission_charges: Optional[Dict[str, float]] = None,
     average_daily_dollar_volume: Optional[Dict[str, float]] = None,
+    market_impact_model: str = DEFAULT_MARKET_IMPACT_MODEL,
     market_impact_coefficient: Optional[float] = None,
     per_asset_market_impact_coefficients: Optional[Dict[str, float]] = None,
     impact_adv_floor: float = DEFAULT_IMPACT_ADV_FLOOR,
+    impact_threshold_adv_ratio: float = DEFAULT_IMPACT_THRESHOLD_ADV_RATIO,
+    impact_excess_slope_multiplier: float = DEFAULT_IMPACT_EXCESS_SLOPE_MULTIPLIER,
     total_amount: float = 1.0,
     max_positions: Optional[int] = None,
     min_position_weight: Optional[float] = None,
@@ -904,6 +997,8 @@ def run_all_models(
     factor_covariance: Optional[Dict[str, Dict[str, float]]] = None,
     specific_risk: Optional[Dict[str, float]] = None,
     lot_sizes: Optional[np.ndarray] = None,
+    minimum_lot_units: Optional[np.ndarray] = None,
+    maximum_lot_units: Optional[np.ndarray] = None,
 ) -> dict:
     """
     Run all core portfolio optimization models.
@@ -1032,10 +1127,15 @@ def run_all_models(
             "transaction_cost_rate": transaction_cost_rate,
             "transaction_cost_model": transaction_cost_model,
             "per_asset_transaction_costs": per_asset_transaction_costs,
+            "fixed_ticket_charge": fixed_ticket_charge,
+            "per_asset_fixed_ticket_charges": per_asset_fixed_ticket_charges,
+            "average_daily_dollar_volume": average_daily_dollar_volume,
+            "market_impact_model": market_impact_model,
             "market_impact_coefficient": float(max(market_impact_coefficient or 0.0, 0.0)),
             "per_asset_market_impact_coefficients": per_asset_market_impact_coefficients,
-            "average_daily_dollar_volume": average_daily_dollar_volume,
             "impact_adv_floor": impact_adv_floor,
+            "impact_threshold_adv_ratio": impact_threshold_adv_ratio,
+            "impact_excess_slope_multiplier": impact_excess_slope_multiplier,
             "total_amount": total_amount,
             "risk_free_rate": risk_free_rate,
         }))
@@ -1058,6 +1158,8 @@ def run_all_models(
             "total_amount": total_amount,
             "risk_level": risk_level,
             "lot_sizes": lot_sizes,
+            "minimum_lot_units": minimum_lot_units,
+            "maximum_lot_units": maximum_lot_units,
             "risk_free_rate": risk_free_rate,
         }))
 
@@ -1346,11 +1448,18 @@ def transaction_cost_rebalancing(
     risk_level: float = 0.5,
     transaction_cost_model: str = DEFAULT_TRANSACTION_COST_MODEL,
     transaction_cost_rate: float = 0.001,
+    fixed_ticket_charge: Optional[float] = None,
+    minimum_commission_charge: Optional[float] = None,
     per_asset_transaction_costs: Optional[Dict[str, float]] = None,
+    per_asset_fixed_ticket_charges: Optional[Dict[str, float]] = None,
+    per_asset_minimum_commission_charges: Optional[Dict[str, float]] = None,
+    market_impact_model: str = DEFAULT_MARKET_IMPACT_MODEL,
     market_impact_coefficient: float = 0.0,
     per_asset_market_impact_coefficients: Optional[Dict[str, float]] = None,
     average_daily_dollar_volume: Optional[Dict[str, float]] = None,
     impact_adv_floor: float = DEFAULT_IMPACT_ADV_FLOOR,
+    impact_threshold_adv_ratio: float = DEFAULT_IMPACT_THRESHOLD_ADV_RATIO,
+    impact_excess_slope_multiplier: float = DEFAULT_IMPACT_EXCESS_SLOPE_MULTIPLIER,
     total_amount: float = 1.0,
     risk_free_rate: float = 0.04,
 ) -> dict:
@@ -1359,17 +1468,33 @@ def transaction_cost_rebalancing(
     total_amount = float(max(total_amount, 1e-8))
     target_return = float(np.min(mu) + (np.max(mu) - np.min(mu)) * risk_level)
     ordered_tickers = tickers if tickers is not None else [str(index) for index in range(n)]
-    transaction_cost_rates, market_impact_rates, penalties = _resolve_execution_penalties(
+    (
+        transaction_cost_rates,
+        minimum_commission_weight_costs,
+        market_impact_rates,
+        market_impact_penalty_rates,
+        fixed_ticket_weight_costs,
+        impact_threshold_weights,
+        impact_excess_penalty_rates,
+    ) = _resolve_execution_penalties(
         tickers=ordered_tickers,
         transaction_cost_model=transaction_cost_model,
         transaction_cost_rate=transaction_cost_rate,
+        fixed_ticket_charge=fixed_ticket_charge,
+        minimum_commission_charge=minimum_commission_charge,
         per_asset_transaction_costs=per_asset_transaction_costs,
+        per_asset_fixed_ticket_charges=per_asset_fixed_ticket_charges,
+        per_asset_minimum_commission_charges=per_asset_minimum_commission_charges,
+        market_impact_model=market_impact_model,
         market_impact_coefficient=market_impact_coefficient,
         per_asset_market_impact_coefficients=per_asset_market_impact_coefficients,
         average_daily_dollar_volume=average_daily_dollar_volume,
         total_amount=total_amount,
         impact_adv_floor=impact_adv_floor,
+        impact_threshold_adv_ratio=impact_threshold_adv_ratio,
+        impact_excess_slope_multiplier=impact_excess_slope_multiplier,
     )
+    combined_penalty_rates = transaction_cost_rates + market_impact_penalty_rates
 
     weights = None
     trade_cost = 0.0
@@ -1382,6 +1507,9 @@ def transaction_cost_rebalancing(
         x = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"x_{i}") for i in range(n)]
         buy = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"buy_{i}") for i in range(n)]
         sell = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"sell_{i}") for i in range(n)]
+        commission = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"commission_{i}") for i in range(n)]
+        trade_active = [model.addVar(lb=0.0, ub=1.0, vtype="B", name=f"trade_active_{i}") for i in range(n)]
+        impact_excess = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"impact_excess_{i}") for i in range(n)]
 
         utility = quicksum(mu[i] * x[i] for i in range(n)) - 0.5 * _risk_aversion_from_risk_level(risk_level) * quicksum(
             sigma[i, j] * x[i] * x[j] for i in range(n) for j in range(n)
@@ -1391,13 +1519,29 @@ def transaction_cost_rebalancing(
 
         for index in range(n):
             model.addCons(x[index] == current_vector[index] + buy[index] - sell[index])
+            model.addCons(buy[index] + sell[index] <= trade_active[index])
+            model.addCons(commission[index] >= transaction_cost_rates[index] * (buy[index] + sell[index]))
+            model.addCons(commission[index] >= minimum_commission_weight_costs[index] * trade_active[index])
+            model.addCons(impact_excess[index] >= buy[index] + sell[index] - impact_threshold_weights[index])
 
-        model.addCons(quicksum(x[index] for index in range(n)) + quicksum(penalties[index] * (buy[index] + sell[index]) for index in range(n)) <= 1.0)
+        model.addCons(
+            quicksum(x[index] for index in range(n))
+            + quicksum(commission[index] for index in range(n))
+            + quicksum(market_impact_penalty_rates[index] * (buy[index] + sell[index]) for index in range(n))
+            + quicksum(impact_excess_penalty_rates[index] * impact_excess[index] for index in range(n))
+            + quicksum(fixed_ticket_weight_costs[index] * trade_active[index] for index in range(n))
+            <= 1.0
+        )
         model.optimize()
 
         if model.getStatus() == "optimal":
             weights = _normalize_weights([model.getVal(x[index]) for index in range(n)])
-            trade_cost = float(sum(penalties[index] * (model.getVal(buy[index]) + model.getVal(sell[index])) for index in range(n)))
+            trade_cost = float(
+                sum(model.getVal(commission[index]) for index in range(n))
+                + sum(market_impact_penalty_rates[index] * (model.getVal(buy[index]) + model.getVal(sell[index])) for index in range(n))
+                + sum(impact_excess_penalty_rates[index] * model.getVal(impact_excess[index]) for index in range(n))
+                + sum(fixed_ticket_weight_costs[index] * model.getVal(trade_active[index]) for index in range(n))
+            )
         else:
             raise ValueError(f"SCIP status: {model.getStatus()}")
     except Exception as exc:
@@ -1408,9 +1552,18 @@ def transaction_cost_rebalancing(
 
         def objective(x: np.ndarray) -> float:
             x = np.array(x, dtype=float)
-            turnover = np.sum(np.abs(x - current_vector))
+            turnover_vector = np.abs(x - current_vector)
+            active_vector = (turnover_vector > 1e-6).astype(float)
+            commission_vector = np.maximum(transaction_cost_rates * turnover_vector, minimum_commission_weight_costs * active_vector)
+            impact_excess_vector = np.maximum(turnover_vector - impact_threshold_weights, 0.0)
             utility = float(mu @ x) - 0.5 * _risk_aversion_from_risk_level(risk_level) * float(x @ sigma @ x)
-            return -(utility - float(np.mean(penalties)) * turnover)
+            return -(
+                utility
+                - float(np.sum(commission_vector))
+                - float(np.dot(market_impact_penalty_rates, turnover_vector))
+                - float(np.dot(impact_excess_penalty_rates, impact_excess_vector))
+                - float(np.dot(fixed_ticket_weight_costs, active_vector))
+            )
 
         constraints = [
             {"type": "eq", "fun": lambda x: np.sum(x) - 1.0},
@@ -1426,7 +1579,16 @@ def transaction_cost_rebalancing(
             options={"ftol": 1e-9, "maxiter": 2000},
         )
         weights = _normalize_weights(result.x)
-        trade_cost = float(np.mean(penalties) * np.sum(np.abs(weights - current_vector)))
+        turnover_vector = np.abs(weights - current_vector)
+        active_vector = (turnover_vector > 1e-6).astype(float)
+        commission_vector = np.maximum(transaction_cost_rates * turnover_vector, minimum_commission_weight_costs * active_vector)
+        impact_excess_vector = np.maximum(turnover_vector - impact_threshold_weights, 0.0)
+        trade_cost = float(
+            np.sum(commission_vector)
+            + np.dot(market_impact_penalty_rates, turnover_vector)
+            + np.dot(impact_excess_penalty_rates, impact_excess_vector)
+            + np.dot(fixed_ticket_weight_costs, active_vector)
+        )
 
     expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
     cash_weight = float(max(0.0, 1.0 - float(np.sum(weights))))
@@ -1440,8 +1602,18 @@ def transaction_cost_rebalancing(
         "trade_cost": trade_cost,
         "transaction_cost_model": transaction_cost_model,
         "transaction_cost_rates": transaction_cost_rates,
+        "minimum_commission_charges": minimum_commission_weight_costs * total_amount,
+        "minimum_commission_charge_weights": minimum_commission_weight_costs,
+        "fixed_ticket_charges": fixed_ticket_weight_costs * total_amount,
+            "minimum_commission_charge": minimum_commission_charge,
+        "fixed_ticket_charge_weights": fixed_ticket_weight_costs,
+            "per_asset_minimum_commission_charges": per_asset_minimum_commission_charges,
+        "market_impact_model": market_impact_model,
         "market_impact_rates": market_impact_rates,
-        "combined_penalty_rates": penalties,
+        "market_impact_penalty_rates": market_impact_penalty_rates,
+        "market_impact_threshold_weights": impact_threshold_weights,
+        "market_impact_excess_penalty_rates": impact_excess_penalty_rates,
+        "combined_penalty_rates": combined_penalty_rates,
         "impact_adv_floor": float(max(impact_adv_floor, 1.0)),
         "expected_return": realized_expected_return,
         "expected_risk": expected_risk,
@@ -1514,6 +1686,8 @@ def round_lot_allocation(
     total_amount: float,
     risk_level: float = 0.5,
     lot_sizes: Optional[np.ndarray] = None,
+    minimum_lot_units: Optional[np.ndarray] = None,
+    maximum_lot_units: Optional[np.ndarray] = None,
     risk_free_rate: float = 0.04,
 ) -> dict:
     n = len(mu)
@@ -1527,6 +1701,13 @@ def round_lot_allocation(
         lot_sizes = np.array(lot_sizes, dtype=float)
         if lot_sizes.shape[0] != n:
             raise ValueError("lot_sizes must align with mu and sigma")
+    minimum_lot_units, maximum_lot_units = _resolve_lot_unit_bounds(
+        latest_prices=latest_prices,
+        lot_sizes=lot_sizes,
+        total_amount=total_amount,
+        minimum_lot_units=minimum_lot_units,
+        maximum_lot_units=maximum_lot_units,
+    )
 
     target_return = float(np.min(mu) + (np.max(mu) - np.min(mu)) * risk_level)
     weights = None
@@ -1537,7 +1718,8 @@ def round_lot_allocation(
 
         model = Model()
         model.hideOutput()
-        units = [model.addVar(lb=0.0, ub=1e6, vtype="I", name=f"units_{i}") for i in range(n)]
+        units = [model.addVar(lb=0.0, ub=float(maximum_lot_units[i]), vtype="I", name=f"units_{i}") for i in range(n)]
+        active = [model.addVar(lb=0.0, ub=1.0, vtype="B", name=f"active_{i}") for i in range(n)]
         x = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"x_{i}") for i in range(n)]
 
         model.setObjective(quicksum(sigma[i, j] * x[i] * x[j] for i in range(n) for j in range(n)), "minimize")
@@ -1546,6 +1728,9 @@ def round_lot_allocation(
 
         for index in range(n):
             model.addCons(x[index] == (latest_prices[index] * lot_sizes[index] * units[index]) / total_amount)
+            model.addCons(units[index] <= maximum_lot_units[index] * active[index])
+            if minimum_lot_units[index] > 0.0:
+                model.addCons(units[index] >= minimum_lot_units[index] * active[index])
 
         model.addCons(quicksum(latest_prices[index] * lot_sizes[index] * units[index] for index in range(n)) <= total_amount)
         model.optimize()
@@ -1560,6 +1745,9 @@ def round_lot_allocation(
         continuous = mean_variance(mu, sigma, risk_level=risk_level, risk_free_rate=risk_free_rate)["weights"]
         notional = total_amount * continuous
         lot_units = np.floor(notional / np.maximum(latest_prices * lot_sizes, 1e-8))
+        lot_units = np.minimum(lot_units, maximum_lot_units)
+        below_minimum = (lot_units > 0.0) & (lot_units < minimum_lot_units)
+        lot_units[below_minimum] = 0.0
         invested = lot_units * latest_prices * lot_sizes
         weights = invested / total_amount
 
@@ -1573,6 +1761,8 @@ def round_lot_allocation(
         "shares": shares,
         "lot_units": np.array(lot_units, dtype=float),
         "lot_sizes": np.array(lot_sizes, dtype=float),
+        "minimum_lot_units": np.array(minimum_lot_units, dtype=float),
+        "maximum_lot_units": np.array(maximum_lot_units, dtype=float),
         "expected_return": expected_return + cash_weight * risk_free_rate,
         "expected_risk": expected_risk,
         "sharpe_ratio": sharpe_ratio,

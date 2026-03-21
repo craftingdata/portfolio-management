@@ -111,12 +111,21 @@ def test_estimate_market_inputs_supports_explicit_estimators(monkeypatch):
         mean_shrinkage=0.5,
         covariance_shrinkage=0.4,
     )
+    ewma = estimation.estimate_market_inputs(
+        prices_df,
+        return_estimator="ewma_mean",
+        covariance_estimator="ewma",
+        estimator_decay=0.90,
+    )
 
-    assert sample.mu.shape == shrunk.mu.shape == (3,)
-    assert sample.sigma_matrix.shape == shrunk.sigma_matrix.shape == (3, 3)
+    assert sample.mu.shape == shrunk.mu.shape == ewma.mu.shape == (3,)
+    assert sample.sigma_matrix.shape == shrunk.sigma_matrix.shape == ewma.sigma_matrix.shape == (3, 3)
     assert not np.allclose(sample.mu, shrunk.mu)
+    assert not np.allclose(sample.mu, ewma.mu)
     assert np.all(np.isfinite(shrunk.mu))
+    assert np.all(np.isfinite(ewma.mu))
     assert np.all(np.linalg.eigvalsh(shrunk.sigma_matrix) > 0)
+    assert np.all(np.linalg.eigvalsh(ewma.sigma_matrix) > 0)
 
 
 def test_estimate_market_inputs_requires_minimum_history():

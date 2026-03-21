@@ -13,6 +13,7 @@ def _make_mock_market_data(
     covariance_estimator="sample",
     mean_shrinkage=0.0,
     covariance_shrinkage=0.0,
+    estimator_decay=0.94,
 ):
     """Return synthetic market data for testing without network access."""
     if tickers is None:
@@ -146,6 +147,7 @@ def test_optimize_passes_estimator_configuration(client):
             "covariance_estimator": "diagonal_shrinkage",
             "mean_shrinkage": 0.35,
             "covariance_shrinkage": 0.25,
+            "estimator_decay": 0.9,
         })
 
     assert response.status_code == 200, response.text
@@ -153,6 +155,7 @@ def test_optimize_passes_estimator_configuration(client):
     assert captured["covariance_estimator"] == "diagonal_shrinkage"
     assert captured["mean_shrinkage"] == 0.35
     assert captured["covariance_shrinkage"] == 0.25
+    assert captured["estimator_decay"] == 0.9
 
 
 def test_optimize_accepts_factor_contract_and_lot_sizes(client):
@@ -181,6 +184,8 @@ def test_optimize_accepts_factor_contract_and_lot_sizes(client):
                 "factor_covariance": factor_covariance,
                 "specific_risk": specific_risk,
                 "lot_sizes": {"AAPL": 5, "MSFT": 10, "GOOGL": 5, "AMZN": 1, "META": 1},
+                "minimum_lot_units": {"AAPL": 2, "MSFT": 1},
+                "maximum_lot_units": {"AAPL": 5, "MSFT": 3, "GOOGL": 4, "AMZN": 10, "META": 10},
                 "sector_max_weights": {"technology": 0.8},
                 "max_positions": 3,
             })
@@ -219,19 +224,67 @@ def test_optimize_passes_execution_cost_configuration(client):
                     "investment_horizon": "medium",
                     "tickers": ["AAPL", "MSFT", "SPY"],
                     "current_weights": {"AAPL": 0.4, "MSFT": 0.3, "SPY": 0.3},
-                    "transaction_cost_model": "interactive_brokers_fixed",
+                    "transaction_cost_model": "interactive_brokers_tiered",
                     "transaction_cost_rate": 0.001,
+                    "fixed_ticket_charge": 1.0,
+                    "minimum_commission_charge": 0.35,
                     "per_asset_transaction_costs": {"AAPL": 0.002, "SPY": 0.0005},
+                    "per_asset_fixed_ticket_charges": {"AAPL": 2.0},
+                    "per_asset_minimum_commission_charges": {"AAPL": 0.75},
+                    "market_impact_model": "piecewise_linear",
                     "market_impact_coefficient": 0.025,
                     "per_asset_market_impact_coefficients": {"AAPL": 0.04},
                     "impact_adv_floor": 7500000,
+                    "impact_threshold_adv_ratio": 0.08,
+                    "impact_excess_slope_multiplier": 2.5,
                 })
 
     assert response.status_code == 200, response.text
-    assert captured["transaction_cost_model"] == "interactive_brokers_fixed"
+    assert captured["transaction_cost_model"] == "interactive_brokers_tiered"
+    assert captured["fixed_ticket_charge"] == 1.0
+    assert captured["minimum_commission_charge"] == 0.35
     assert captured["per_asset_transaction_costs"] == {"AAPL": 0.002, "SPY": 0.0005}
+    assert captured["per_asset_fixed_ticket_charges"] == {"AAPL": 2.0}
+    assert captured["per_asset_minimum_commission_charges"] == {"AAPL": 0.75}
+    assert captured["market_impact_model"] == "piecewise_linear"
     assert captured["per_asset_market_impact_coefficients"] == {"AAPL": 0.04}
     assert captured["impact_adv_floor"] == 7500000.0
+    assert captured["impact_threshold_adv_ratio"] == 0.08
+    assert captured["impact_excess_slope_multiplier"] == 2.5
+
+
+def test_optimize_resolves_repo_lot_metadata_when_request_omits_lot_sizes(client):
+    captured = {}
+
+    def fake_run_all_models(**kwargs):
+        captured.update(kwargs)
+        return {
+            "MinimumVariance": {
+                "model_name": "MinimumVariance",
+                "weights": np.array([0.5, 0.5]),
+                "expected_return": 0.10,
+                "expected_risk": 0.12,
+                "sharpe_ratio": 0.50,
+            }
+        }
+
+    with patch("app.main.get_market_data", side_effect=lambda **kwargs: _make_mock_market_data(tickers=["AAPL", "VFINX"])):
+        with patch("app.main.get_market_metadata", return_value={
+            "AAPL": {"assetType": "Equity", "isEtf": False},
+            "VFINX": {"assetType": "Mutual Fund", "isEtf": False},
+        }):
+            with patch("app.main.run_all_models", side_effect=fake_run_all_models):
+                response = client.post("/optimize", json={
+                    "total_amount": 100000,
+                    "risk_tolerance": "medium",
+                    "investment_horizon": "medium",
+                    "tickers": ["AAPL", "VFINX"],
+                })
+
+    assert response.status_code == 200, response.text
+    assert captured["lot_sizes"] == [100.0, 1.0]
+    assert captured["minimum_lot_units"] is None
+    assert captured["maximum_lot_units"] is None
 
 
 def test_optimize_low_risk(client):

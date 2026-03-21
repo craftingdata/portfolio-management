@@ -31,10 +31,20 @@ def _extract_latest_metric_series(metric_output: pd.DataFrame | pd.Series) -> pd
     return metric_output.iloc[-1]
 
 
+def _exponential_weights(n_observations: int, decay: float) -> np.ndarray:
+    if n_observations <= 0:
+        raise ValueError("n_observations must be positive")
+    clipped_decay = float(min(max(decay, 1e-6), 0.9999))
+    powers = np.arange(n_observations - 1, -1, -1, dtype=float)
+    weights = (1.0 - clipped_decay) * np.power(clipped_decay, powers)
+    return weights / float(np.sum(weights))
+
+
 def _estimate_expected_returns(
     returns_df: pd.DataFrame,
     method: str,
     mean_shrinkage: float,
+    estimator_decay: float,
 ) -> np.ndarray:
     sample_mean = returns_df.mean().to_numpy(dtype=float) * 252
     if method == "sample":
@@ -42,6 +52,9 @@ def _estimate_expected_returns(
     if method == "shrunk_mean":
         grand_mean = float(np.mean(sample_mean))
         return (1.0 - mean_shrinkage) * sample_mean + mean_shrinkage * grand_mean
+    if method == "ewma_mean":
+        weights = _exponential_weights(len(returns_df), estimator_decay)
+        return np.average(returns_df.to_numpy(dtype=float), axis=0, weights=weights) * 252
     raise ValueError(f"Unsupported return estimator: {method}")
 
 
@@ -49,6 +62,7 @@ def _estimate_covariance_matrix(
     returns_df: pd.DataFrame,
     method: str,
     covariance_shrinkage: float,
+    estimator_decay: float,
 ) -> np.ndarray:
     sample_covariance = returns_df.cov().to_numpy(dtype=float) * 252
     if method == "sample":
@@ -56,6 +70,14 @@ def _estimate_covariance_matrix(
     if method == "diagonal_shrinkage":
         diagonal_target = np.diag(np.diag(sample_covariance))
         return (1.0 - covariance_shrinkage) * sample_covariance + covariance_shrinkage * diagonal_target
+    if method == "ewma":
+        observations = returns_df.to_numpy(dtype=float)
+        weights = _exponential_weights(len(returns_df), estimator_decay)
+        weighted_mean = np.average(observations, axis=0, weights=weights)
+        centered = observations - weighted_mean
+        normalization = float(max(1e-8, 1.0 - np.sum(weights**2)))
+        weighted_covariance = (centered * weights[:, None]).T @ centered / normalization
+        return weighted_covariance * 252
     raise ValueError(f"Unsupported covariance estimator: {method}")
 
 
@@ -72,6 +94,7 @@ def estimate_market_inputs(
     covariance_estimator: str = "sample",
     mean_shrinkage: float = 0.0,
     covariance_shrinkage: float = 0.0,
+    estimator_decay: float = 0.94,
 ) -> EstimatedMarketData:
     """Estimate annualized return and covariance from prices and collect FinanceToolkit risk diagnostics when an API key is available."""
     if prices_df.shape[0] < 3:
@@ -81,11 +104,17 @@ def estimate_market_inputs(
     if returns_df.shape[0] < 2:
         raise ValueError("At least two return observations are required to estimate market inputs")
 
-    mu = _estimate_expected_returns(returns_df, method=return_estimator, mean_shrinkage=float(mean_shrinkage))
+    mu = _estimate_expected_returns(
+        returns_df,
+        method=return_estimator,
+        mean_shrinkage=float(mean_shrinkage),
+        estimator_decay=float(estimator_decay),
+    )
     sigma_matrix = _estimate_covariance_matrix(
         returns_df,
         method=covariance_estimator,
         covariance_shrinkage=float(covariance_shrinkage),
+        estimator_decay=float(estimator_decay),
     )
     sigma_matrix = _ensure_positive_definite(sigma_matrix)
 

@@ -71,7 +71,7 @@ def test_get_market_data_uses_fmp(monkeypatch):
     monkeypatch.setattr(
         data_service,
         "estimate_market_inputs",
-        lambda prices_df, api_key=None, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0: fake_estimated,
+        lambda prices_df, api_key=None, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0, estimator_decay=0.94: fake_estimated,
     )
 
     prices_df, returns_df, mu, sigma = data_service.get_market_data(["AAPL", "MSFT"], period_months=1)
@@ -101,12 +101,12 @@ def test_get_market_data_falls_back_to_synthetic_for_non_auth_failure(monkeypatc
     monkeypatch.setattr(
         data_service,
         "_fetch_fmp_market_data",
-        lambda tickers, period_months, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0: (_ for _ in ()).throw(RuntimeError("upstream fmp error")),
+        lambda tickers, period_months, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0, estimator_decay=0.94: (_ for _ in ()).throw(RuntimeError("upstream fmp error")),
     )
     monkeypatch.setattr(
         data_service,
         "_generate_synthetic_data",
-        lambda tickers, n_days, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0: expected,
+        lambda tickers, n_days, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0, estimator_decay=0.94: expected,
     )
 
     actual = data_service.get_market_data(["AAPL", "MSFT"], period_months=1)
@@ -194,7 +194,7 @@ def test_get_market_data_aligns_dates_and_drops_sparse_series(monkeypatch):
         ticker = url.rsplit("/", 1)[-1]
         return _FakeResponse(payloads[ticker])
 
-    def fake_estimate(prices_df, api_key=None, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0):
+    def fake_estimate(prices_df, api_key=None, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0, estimator_decay=0.94):
         captured["prices_df"] = prices_df.copy()
         returns_df = prices_df.pct_change().dropna()
         return SimpleNamespace(
@@ -216,3 +216,22 @@ def test_get_market_data_aligns_dates_and_drops_sparse_series(monkeypatch):
     assert returns_df.shape[1] == 2
     assert mu.shape == (2,)
     assert sigma.shape == (2, 2)
+
+
+def test_resolve_lot_configuration_uses_repo_defaults_and_request_overrides():
+    resolved = data_service.resolve_lot_configuration(
+        tickers=["AAPL", "VFINX", "BRK.A"],
+        market_metadata={
+            "AAPL": {"assetType": "Equity", "isEtf": False},
+            "VFINX": {"assetType": "Mutual Fund", "isEtf": False},
+            "BRK.A": {"assetType": "Equity", "isEtf": False},
+        },
+        requested_lot_sizes={"AAPL": 25},
+        requested_minimum_lot_units={"AAPL": 2},
+    )
+
+    assert resolved["lot_sizes"]["AAPL"] == 25
+    assert resolved["lot_sizes"]["VFINX"] == 1
+    assert resolved["lot_sizes"]["BRK.A"] == 1
+    assert resolved["minimum_lot_units"]["AAPL"] == 2
+    assert "VFINX" not in resolved["minimum_lot_units"]

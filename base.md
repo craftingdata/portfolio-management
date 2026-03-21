@@ -112,7 +112,9 @@ The next model should be aware of these repo-specific realities:
 - `data_service.py` now has a lightweight FMP provider wrapper, but the public module still centralizes orchestration and synthetic fallback behavior.
 - `optimization.py` currently exposes one function per strategy plus `run_all_models()`. It now includes utility, leverage, and turnover-aware models, but it is still not split into model-builder abstractions.
 - `ranking.py` now blends heuristic tables with realized optimizer output quality and frontier context.
-- The API request model now exposes leverage, turnover, sector-cap, calibrated transaction-cost and market-impact controls, basic cardinality controls, estimator selection, explicit factor-model inputs, and configurable lot sizes, but the surrounding provider and validation layers are still relatively thin.
+- The API request model now exposes leverage, turnover, sector-cap, calibrated transaction-cost and market-impact controls, flat ticket-fee inputs, basic cardinality controls, estimator selection, explicit factor-model inputs, configurable lot sizes, and optional lot-unit bounds, but the surrounding provider and validation layers are still relatively thin.
+- The current estimator layer is no longer limited to sample and diagonal-shrinkage style inputs; it now supports EWMA return and covariance estimation directly from aligned price history without requiring any new provider data.
+- The market-impact path is no longer linear-only; it now supports either a linear ADV-scaled penalty or a steeper piecewise-linear schedule above a configurable participation threshold using the existing liquidity inputs.
 - The inferred factor-model path now builds a richer multi-factor covariance using a market factor plus statistical residual factors from aligned returns, while explicit factor contracts still take precedence.
 - Sector-constrained optimization now normalizes common sector aliases, infers sectors from industry when possible, excludes ETFs, and drops assets with unstable sector metadata from the constrained subproblem.
 - Synthetic fallback still exists in `data_service.py`; it should be treated as test/degradation behavior, not as a preferred production path.
@@ -126,7 +128,7 @@ The focused command that already passes after the latest changes is:
 uv run pytest tests -q
 ```
 
-Most recent verified result before this handoff: `45 passed`.
+Most recent verified result before this handoff: `54 passed`.
 
 General repo test command:
 
@@ -138,10 +140,8 @@ uv run pytest tests -q
 
 The repo now has first-pass implementations for the major advanced notebook families, but it is still short of broader parity in a few important areas:
 
-- richer lot-size semantics beyond the current request-driven lot-size assumptions
-- deeper transaction-cost calibration beyond the current Interactive Brokers-style baseline plus per-asset overrides, especially fixed-fee schedules
-- more rigorous market-impact modeling beyond the current linear ADV-based formulation
-- deeper provider expansion and estimator families beyond the current FMP wrapper and sample or shrinkage options
+- broader provider expansion beyond the current FMP wrapper
+- estimator families beyond the current sample, shrinkage, and EWMA options
 
 ## Coverage Verification
 
@@ -341,13 +341,13 @@ These are no longer absent from the repo, but the remaining parity work is still
 
 - sector allocation constraints
   - blocker type: richer metadata normalization and ETF handling
-  - current gap: sector metadata retrieval exists, but normalization policy and broader taxonomy support are still limited
+  - current gap: sector metadata retrieval and alias normalization exist, but broader taxonomy coverage is still limited
 - factor model objective and constraint variants
   - blocker type: richer factor data source
-  - current gap: the repo currently derives a simple market-factor proxy rather than maintaining a reusable exposure matrix, factor covariance, and specific-risk pipeline across broader factor families
+  - current gap: the repo now supports explicit contracts plus inferred market and residual statistical factors, but it still lacks a broader reusable factor-data pipeline across wider factor families
 - round-lot constraints
   - blocker type: richer lot-size and execution semantics
-  - current gap: the current implementation assumes one-share lots by default and does not yet support market-specific lot metadata
+  - current gap: the repo now supports repo-managed lot metadata defaults and request overrides, but it still lacks broader market-specific coverage and richer share-level response semantics
 
 ### Heavily Gated By Richer Trading Semantics
 
@@ -355,13 +355,13 @@ These have first-pass support, but parity work still spans schema, orchestration
 
 - rebalancing with transaction costs
   - blocker type: richer trade and budget semantics
-  - current gap: the repo now models buy/sell variables with proportional costs, but fixed-fee variants, share-level rebalance semantics, and richer broker schedules are still absent
+  - current gap: the repo now models proportional costs, fixed ticket fees, minimum commissions, and ADV-linked market impact, but it still lacks share-level rebalance semantics and deeper broker-calibration coverage
 - transaction-cost-aware investing
   - blocker type: calibration depth
-  - current gap: the current optimizer supports proportional costs, but not a broader family of per-asset, broker-specific, or fixed-charge models
+  - current gap: the current optimizer supports per-asset proportional costs, fixed ticket charges, and tiered minimum-commission schedules, but broader broker-specific calibration is still missing
 - market-impact modeling
   - blocker type: model fidelity and calibration
-  - current gap: the repo now supports a linear ADV-based penalty path, but not a deeper calibration workflow or richer nonlinear formulations
+  - current gap: the repo now supports linear and piecewise-linear ADV-based penalties, but not a deeper calibration workflow or richer nonlinear formulations
 
 ### Ranking Is Gated By Upstream Outputs
 
@@ -420,7 +420,7 @@ These are not ready as pure solver tasks because the contract and modeling input
 The remaining parity gaps are not all the same kind of work.
 
 - ready now: provider cleanup, estimator hardening, richer validation, README/base.md reconciliation, and calibration work around already-implemented advanced models
-- still partially gated by richer inputs or semantics: broader factor pipelines, richer sector normalization, fuller lot metadata, deeper transaction-cost schedules, and higher-fidelity market-impact modeling
+- still partially gated by richer inputs or semantics: broader factor pipelines, broader provider coverage, additional estimator families, deeper transaction-cost calibration, and higher-fidelity market-impact modeling
 
 ## Which Gates Can Be Removed By FMP Or FinanceToolkit
 
@@ -1028,7 +1028,7 @@ How to obtain it:
 
 Policy chosen:
 
-- U.S. equities default to one-share lots in the first version
+- repo-managed lot metadata now provides default lot sizes with request overrides and metadata-aware asset-bucket fallbacks
 - round-lot models should solve directly in integer units or lots, not through a weight-optimization step followed by a rounding post-pass
 
 Decisions that still remain:
@@ -1037,7 +1037,7 @@ Decisions that still remain:
 
 Implementation status:
 
-- implemented in a first-pass form using latest prices and a one-share default lot assumption; remaining work is richer lot metadata and share-level response semantics if the API needs to expose them more explicitly
+- implemented in a first-pass form using latest prices, repo-managed lot metadata defaults, and integer lot units; remaining work is broader metadata coverage and share-level response semantics if the API needs to expose them more explicitly
 
 ### Transaction-Cost-Aware Rebalancing
 
@@ -1195,13 +1195,13 @@ Implications if changed later:
 
 ### Round Lots
 
-- default U.S. equities to one-share lots in the first version
+- default lot sizes through repo-managed metadata, with request overrides when callers need instrument-specific assumptions
 - do not allow fractional trading in the first version
 - solve round-lot portfolios directly in integer units or lots, not by optimizing continuous weights and rounding afterward
 
 Why this is important:
 
-- one-share lots are the least opinionated default for U.S. equities and avoid inventing a special lot schedule where one may not exist
+- repo-managed lot defaults keep the API deterministic while still allowing different asset buckets to trade in different minimum units
 - this keeps the first integer-trading model simple enough to validate against continuous-weight outputs
 - solving directly in integer units preserves the integrity of the optimization problem, so the returned portfolio is actually feasible under the lot constraints rather than only approximately feasible after rounding
 

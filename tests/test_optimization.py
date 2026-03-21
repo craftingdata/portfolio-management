@@ -304,6 +304,7 @@ def test_sector_allocation_transaction_cost_and_integer_models(price_frame_data)
         tickers=tickers,
         risk_level=0.5,
         transaction_cost_rate=0.001,
+        fixed_ticket_charge=1.0,
         market_impact_coefficient=0.025,
         average_daily_dollar_volume={ticker: 5_000_000.0 for ticker in tickers},
         total_amount=100000.0,
@@ -342,7 +343,10 @@ def test_transaction_cost_rebalancing_supports_per_asset_calibration(price_frame
         risk_level=0.5,
         transaction_cost_model="interactive_brokers_fixed",
         transaction_cost_rate=0.001,
+        fixed_ticket_charge=1.0,
         per_asset_transaction_costs={"AAPL": 0.0025, "SPY": 0.0005},
+        per_asset_fixed_ticket_charges={"AAPL": 2.5, "SPY": 0.5},
+        market_impact_model="piecewise_linear",
         market_impact_coefficient=0.025,
         per_asset_market_impact_coefficients={"AAPL": 0.04, "SPY": 0.01},
         average_daily_dollar_volume={
@@ -358,11 +362,65 @@ def test_transaction_cost_rebalancing_supports_per_asset_calibration(price_frame
 
     assert result["transaction_cost_model"] == "interactive_brokers_fixed"
     assert len(result["transaction_cost_rates"]) == len(tickers)
+    assert len(result["fixed_ticket_charges"]) == len(tickers)
     assert len(result["market_impact_rates"]) == len(tickers)
     assert len(result["combined_penalty_rates"]) == len(tickers)
     assert result["impact_adv_floor"] == 5_000_000.0
+    assert result["market_impact_model"] == "piecewise_linear"
     assert result["transaction_cost_rates"][0] > result["transaction_cost_rates"][-1]
+    assert result["fixed_ticket_charges"][0] > result["fixed_ticket_charges"][-1]
     assert result["combined_penalty_rates"][0] > result["combined_penalty_rates"][-1]
+    assert np.all(result["market_impact_excess_penalty_rates"] >= 0.0)
+    assert_valid_portfolio(result, len(mu))
+
+
+def test_transaction_cost_rebalancing_supports_minimum_commissions(price_frame_data):
+    tickers, prices_df, returns_df, mu, sigma = price_frame_data
+    result = transaction_cost_rebalancing(
+        mu,
+        sigma,
+        current_weights=np.array([0.24, 0.22, 0.20, 0.19, 0.15]),
+        tickers=tickers,
+        risk_level=0.5,
+        transaction_cost_model="interactive_brokers_tiered",
+        transaction_cost_rate=0.0005,
+        minimum_commission_charge=0.35,
+        per_asset_minimum_commission_charges={"AAPL": 0.75, "SPY": 0.10},
+        total_amount=100000.0,
+    )
+
+    assert result["transaction_cost_model"] == "interactive_brokers_tiered"
+    assert len(result["minimum_commission_charges"]) == len(tickers)
+    assert result["minimum_commission_charges"][0] > result["minimum_commission_charges"][-1]
+    assert np.all(result["minimum_commission_charge_weights"] >= 0.0)
+    assert_valid_portfolio(result, len(mu))
+
+
+def test_round_lot_allocation_supports_lot_unit_bounds():
+    mu = np.array([0.22, 0.08, 0.06])
+    sigma = np.array([
+        [0.06, 0.01, 0.01],
+        [0.01, 0.04, 0.01],
+        [0.01, 0.01, 0.03],
+    ])
+    latest_prices = np.array([10.0, 20.0, 25.0])
+    lot_sizes = np.array([5.0, 2.0, 1.0])
+
+    result = round_lot_allocation(
+        mu,
+        sigma,
+        latest_prices,
+        total_amount=1000.0,
+        risk_level=0.8,
+        lot_sizes=lot_sizes,
+        minimum_lot_units=np.array([2.0, 0.0, 0.0]),
+        maximum_lot_units=np.array([3.0, 4.0, 5.0]),
+    )
+
+    assert result["lot_units"][0] in {0.0, 2.0, 3.0}
+    assert np.all(result["lot_units"] <= result["maximum_lot_units"] + 1e-8)
+    assert result["lot_units"][1] <= 4.0
+    assert result["shares"][0] == pytest.approx(result["lot_units"][0] * lot_sizes[0])
     assert_valid_portfolio(result, len(mu))
 
 

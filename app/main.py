@@ -1,8 +1,12 @@
+import logging
+
 from fastapi import FastAPI, HTTPException
 from app.models.schemas import FrontierPoint, OptimizeRequest, OptimizeResponse
-from app.services.data_service import get_market_data, get_market_liquidity, get_market_metadata
+from app.services.data_service import get_market_data, get_market_liquidity, get_market_metadata, resolve_lot_configuration
 from app.services.optimization import generate_efficient_frontier, run_all_models
 from app.services.ranking import rank_portfolios
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Portfolio Management API", version="1.0.0")
 
@@ -50,24 +54,44 @@ def optimize(request: OptimizeRequest):
             covariance_estimator=request.covariance_estimator,
             mean_shrinkage=request.mean_shrinkage,
             covariance_shrinkage=request.covariance_shrinkage,
+            estimator_decay=request.estimator_decay,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Data fetch error: {str(e)}")
 
     tickers = list(prices_df.columns)
     latest_prices = prices_df.iloc[-1].to_numpy(dtype=float)
-    lot_sizes = None
-    if request.lot_sizes:
-        lot_sizes = [float(request.lot_sizes.get(ticker, 1)) for ticker in tickers]
     period_used = f"{len(prices_df)} trading days"
 
     sector_metadata = None
+    market_metadata = None
     average_daily_dollar_volume = None
-    if request.sector_max_weights:
+    should_fetch_metadata = bool(request.sector_max_weights) or any(
+        value is None for value in (request.lot_sizes, request.minimum_lot_units, request.maximum_lot_units)
+    )
+    if should_fetch_metadata:
         try:
-            sector_metadata = get_market_metadata(tickers)
+            market_metadata = get_market_metadata(tickers)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Metadata fetch error: {str(exc)}")
+            if request.sector_max_weights:
+                raise HTTPException(status_code=500, detail=f"Metadata fetch error: {str(exc)}")
+            logger.warning("Metadata fetch failed during lot resolution; using repo defaults where available: %s", exc)
+
+    if request.sector_max_weights:
+        sector_metadata = market_metadata
+
+    resolved_lot_configuration = resolve_lot_configuration(
+        tickers=tickers,
+        market_metadata=market_metadata,
+        requested_lot_sizes=request.lot_sizes,
+        requested_minimum_lot_units=request.minimum_lot_units,
+        requested_maximum_lot_units=request.maximum_lot_units,
+    )
+    lot_sizes = [float(resolved_lot_configuration["lot_sizes"].get(ticker, 1)) for ticker in tickers]
+    minimum_lot_unit_map = resolved_lot_configuration["minimum_lot_units"]
+    maximum_lot_unit_map = resolved_lot_configuration["maximum_lot_units"]
+    minimum_lot_units = [float(minimum_lot_unit_map.get(ticker, 0)) for ticker in tickers] if minimum_lot_unit_map else None
+    maximum_lot_units = [float(maximum_lot_unit_map.get(ticker, 0)) for ticker in tickers] if maximum_lot_unit_map else None
 
     has_market_impact_input = (
         (request.market_impact_coefficient is not None and request.market_impact_coefficient > 0.0)
@@ -98,11 +122,18 @@ def optimize(request: OptimizeRequest):
             sector_max_weights=request.sector_max_weights,
             transaction_cost_model=request.transaction_cost_model,
             transaction_cost_rate=request.transaction_cost_rate,
+            fixed_ticket_charge=request.fixed_ticket_charge,
+            minimum_commission_charge=request.minimum_commission_charge,
             per_asset_transaction_costs=request.per_asset_transaction_costs,
+            per_asset_fixed_ticket_charges=request.per_asset_fixed_ticket_charges,
+            per_asset_minimum_commission_charges=request.per_asset_minimum_commission_charges,
             average_daily_dollar_volume=average_daily_dollar_volume,
+            market_impact_model=request.market_impact_model,
             market_impact_coefficient=request.market_impact_coefficient,
             per_asset_market_impact_coefficients=request.per_asset_market_impact_coefficients,
             impact_adv_floor=request.impact_adv_floor,
+            impact_threshold_adv_ratio=request.impact_threshold_adv_ratio,
+            impact_excess_slope_multiplier=request.impact_excess_slope_multiplier,
             total_amount=request.total_amount,
             max_positions=request.max_positions,
             min_position_weight=request.min_position_weight,
@@ -110,6 +141,8 @@ def optimize(request: OptimizeRequest):
             factor_covariance=request.factor_covariance,
             specific_risk=request.specific_risk,
             lot_sizes=lot_sizes,
+            minimum_lot_units=minimum_lot_units,
+            maximum_lot_units=maximum_lot_units,
         )
         efficient_frontier = generate_efficient_frontier(
             mu=mu,

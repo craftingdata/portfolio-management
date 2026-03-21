@@ -1,0 +1,19 @@
+defaults:
+  fallback:
+    lot_size: 100
+  asset_types:
+    adr:
+      lot_size: 100
+    equity:
+      lot_size: 100
+    etf:
+      lot_size: 100
+    mutual_fund:
+      lot_size: 1
+    money_market:
+      lot_size: 1
+    crypto:
+      lot_size: 1
+tickers:
+  BRK.A:
+    lot_size: 1

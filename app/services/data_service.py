@@ -2,11 +2,13 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
 import pandas as pd
+import yaml
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import KeyVaultSecret, SecretClient
 
@@ -17,8 +19,10 @@ logger = logging.getLogger(__name__)
 AZURE_KEYVAULT_NAME = os.getenv("AZURE_KEYVAULT_NAME", "rajesh-invest")
 FMP_API_SECRET_NAME = os.getenv("FMP_API_SECRET_NAME", "fmpapi")
 FMP_BASE_URL = os.getenv("FMP_BASE_URL", "https://financialmodelingprep.com/api/v3")
+LOT_METADATA_PATH = Path(__file__).resolve().parents[1] / "config" / "lot_metadata.yml"
 
 _fmp_secret_cache: Optional[KeyVaultSecret] = None
+_lot_metadata_cache: Optional[dict] = None
 
 
 class MissingFMPAPIKeyError(RuntimeError):
@@ -110,6 +114,112 @@ def _build_fmp_provider(api_key: str) -> FMPMarketDataProvider:
     return FMPMarketDataProvider(FMPProviderConfig(api_key=api_key))
 
 
+def _normalize_lot_metadata_token(value: Optional[object]) -> str:
+    if value is None:
+        return ""
+
+    cleaned = []
+    previous_was_separator = False
+    for character in str(value).strip().lower():
+        if character.isalnum():
+            cleaned.append(character)
+            previous_was_separator = False
+        elif not previous_was_separator:
+            cleaned.append("_")
+            previous_was_separator = True
+    return "_".join(part for part in "".join(cleaned).split("_") if part)
+
+
+def _load_lot_metadata_config() -> dict:
+    global _lot_metadata_cache
+
+    if _lot_metadata_cache is not None:
+        return _lot_metadata_cache
+
+    default_config = {
+        "defaults": {
+            "fallback": {"lot_size": 1},
+            "asset_types": {},
+        },
+        "tickers": {},
+    }
+
+    try:
+        with LOT_METADATA_PATH.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+    except FileNotFoundError:
+        logger.warning("Lot metadata file not found at %s; using in-code defaults", LOT_METADATA_PATH)
+        payload = {}
+
+    defaults = payload.get("defaults", {}) if isinstance(payload.get("defaults", {}), dict) else {}
+    tickers = payload.get("tickers", {}) if isinstance(payload.get("tickers", {}), dict) else {}
+    _lot_metadata_cache = {
+        "defaults": {
+            "fallback": defaults.get("fallback", default_config["defaults"]["fallback"]),
+            "asset_types": defaults.get("asset_types", default_config["defaults"]["asset_types"]),
+        },
+        "tickers": {str(ticker).upper().strip(): values for ticker, values in tickers.items() if isinstance(values, dict)},
+    }
+    return _lot_metadata_cache
+
+
+def _resolve_asset_type_bucket(metadata: Optional[Dict[str, object]]) -> str:
+    if not metadata:
+        return ""
+    if str(metadata.get("isEtf", "")).strip().lower() in {"1", "true", "t", "yes", "y"}:
+        return "etf"
+    return _normalize_lot_metadata_token(metadata.get("assetType"))
+
+
+def resolve_lot_configuration(
+    tickers: List[str],
+    market_metadata: Optional[Dict[str, Dict[str, object]]] = None,
+    requested_lot_sizes: Optional[Dict[str, int]] = None,
+    requested_minimum_lot_units: Optional[Dict[str, int]] = None,
+    requested_maximum_lot_units: Optional[Dict[str, int]] = None,
+) -> Dict[str, Dict[str, int]]:
+    config = _load_lot_metadata_config()
+    fallback_defaults = config["defaults"].get("fallback", {})
+    asset_type_defaults = config["defaults"].get("asset_types", {})
+    ticker_defaults = config.get("tickers", {})
+
+    normalized_requested_lot_sizes = {str(ticker).upper().strip(): int(value) for ticker, value in (requested_lot_sizes or {}).items()}
+    normalized_requested_minimums = {str(ticker).upper().strip(): int(value) for ticker, value in (requested_minimum_lot_units or {}).items()}
+    normalized_requested_maximums = {str(ticker).upper().strip(): int(value) for ticker, value in (requested_maximum_lot_units or {}).items()}
+
+    resolved_lot_sizes: Dict[str, int] = {}
+    resolved_minimums: Dict[str, int] = {}
+    resolved_maximums: Dict[str, int] = {}
+
+    for raw_ticker in tickers:
+        ticker = str(raw_ticker).upper().strip()
+        metadata = (market_metadata or {}).get(ticker, {})
+        asset_type_bucket = _resolve_asset_type_bucket(metadata)
+
+        resolved_defaults = dict(fallback_defaults)
+        resolved_defaults.update(asset_type_defaults.get(asset_type_bucket, {}))
+        resolved_defaults.update(ticker_defaults.get(ticker, {}))
+
+        lot_size = normalized_requested_lot_sizes.get(ticker, resolved_defaults.get("lot_size", 1))
+        resolved_lot_sizes[ticker] = max(int(lot_size), 1)
+
+        minimum_lot_units = normalized_requested_minimums.get(ticker, resolved_defaults.get("minimum_lot_units"))
+        if minimum_lot_units is not None and int(minimum_lot_units) > 0:
+            resolved_minimums[ticker] = int(minimum_lot_units)
+
+        maximum_lot_units = normalized_requested_maximums.get(ticker, resolved_defaults.get("maximum_lot_units"))
+        if maximum_lot_units is not None and int(maximum_lot_units) > 0:
+            resolved_maximums[ticker] = int(maximum_lot_units)
+
+    return {
+        "lot_sizes": resolved_lot_sizes,
+        "minimum_lot_units": resolved_minimums,
+        "maximum_lot_units": resolved_maximums,
+    }
+
+
 def _align_and_clean_prices(price_series: List[pd.Series]) -> pd.DataFrame:
     prices_df = pd.concat(price_series, axis=1)
     prices_df = prices_df.dropna(axis=1, thresh=max(2, int(0.8 * len(prices_df))))
@@ -186,6 +296,7 @@ def _fetch_fmp_market_data(
     covariance_estimator: str = "sample",
     mean_shrinkage: float = 0.0,
     covariance_shrinkage: float = 0.0,
+    estimator_decay: float = 0.94,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     """Fetch aligned historical prices from FMP and derive annualized returns and covariance."""
     api_key = get_fmp_api_key()
@@ -212,6 +323,7 @@ def _fetch_fmp_market_data(
         covariance_estimator=covariance_estimator,
         mean_shrinkage=mean_shrinkage,
         covariance_shrinkage=covariance_shrinkage,
+        estimator_decay=estimator_decay,
     )
 
     logger.info("Successfully fetched FMP data for %s over %s days", list(prices_df.columns), len(prices_df))
@@ -274,6 +386,7 @@ def _generate_synthetic_data(
     covariance_estimator: str = "sample",
     mean_shrinkage: float = 0.0,
     covariance_shrinkage: float = 0.0,
+    estimator_decay: float = 0.94,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     """Generate synthetic price data using geometric Brownian motion."""
     np.random.seed(42)
@@ -359,6 +472,7 @@ def _generate_synthetic_data(
         covariance_estimator=covariance_estimator,
         mean_shrinkage=mean_shrinkage,
         covariance_shrinkage=covariance_shrinkage,
+        estimator_decay=estimator_decay,
     )
 
     return prices_df, estimated.returns_df, estimated.mu, estimated.sigma_matrix
@@ -371,6 +485,7 @@ def get_market_data(
     covariance_estimator: str = "sample",
     mean_shrinkage: float = 0.0,
     covariance_shrinkage: float = 0.0,
+    estimator_decay: float = 0.94,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     """
     Fetch market data from FMP using an Azure Key Vault-backed API key,
@@ -391,6 +506,7 @@ def get_market_data(
             covariance_estimator=covariance_estimator,
             mean_shrinkage=mean_shrinkage,
             covariance_shrinkage=covariance_shrinkage,
+            estimator_decay=estimator_decay,
         )
     except MissingFMPAPIKeyError:
         raise
@@ -404,4 +520,5 @@ def get_market_data(
             covariance_estimator=covariance_estimator,
             mean_shrinkage=mean_shrinkage,
             covariance_shrinkage=covariance_shrinkage,
+            estimator_decay=estimator_decay,
         )
