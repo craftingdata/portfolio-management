@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from app.models.schemas import FrontierPoint, OptimizeRequest, OptimizeResponse
-from app.services.data_service import get_market_data
+from app.services.data_service import get_market_data, get_market_liquidity, get_market_metadata
 from app.services.optimization import generate_efficient_frontier, run_all_models
 from app.services.ranking import rank_portfolios
 
@@ -17,6 +17,12 @@ MODEL_DESCRIPTIONS = {
     "MeanVariance": "Classic Markowitz mean-variance optimization with target return. Best for moderate investors.",
     "EqualWeight": "Simple equal allocation to all assets. Robust baseline with no optimization.",
     "RiskParity": "Equalizes risk contributions from each asset. Good for risk-balanced diversification.",
+    "FactorUtilityMaximization": "Utility maximization on a market-factor-implied covariance matrix.",
+    "FactorVarianceConstraint": "Mean-variance optimization using a market-factor-implied covariance matrix.",
+    "SectorAllocation": "Mean-variance optimization with sector concentration limits.",
+    "TransactionCostRebalancing": "Rebalancing model with explicit proportional trading costs.",
+    "CardinalityMinBuyIn": "Cardinality-constrained mean-variance optimization with minimum buy-in limits.",
+    "RoundLotAllocation": "Integer lot-based allocation using latest prices and a cash remainder.",
 }
 
 
@@ -45,7 +51,22 @@ def optimize(request: OptimizeRequest):
         raise HTTPException(status_code=500, detail=f"Data fetch error: {str(e)}")
 
     tickers = list(prices_df.columns)
+    latest_prices = prices_df.iloc[-1].to_numpy(dtype=float)
     period_used = f"{len(prices_df)} trading days"
+
+    sector_metadata = None
+    average_daily_dollar_volume = None
+    if request.sector_max_weights:
+        try:
+            sector_metadata = get_market_metadata(tickers)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Metadata fetch error: {str(exc)}")
+
+    if request.current_weights is not None and request.market_impact_coefficient is not None and request.market_impact_coefficient > 0.0:
+        try:
+            average_daily_dollar_volume = get_market_liquidity(tickers=tickers, period_months=period_months)
+        except Exception:
+            average_daily_dollar_volume = None
 
     # Run optimization models
     try:
@@ -53,6 +74,7 @@ def optimize(request: OptimizeRequest):
             mu=mu,
             sigma=sigma,
             tickers=tickers,
+            returns_df=returns_df,
             risk_tolerance_normalized=request.risk_tolerance,
             risk_free_rate=request.risk_free_rate,
             max_gross_exposure=request.max_gross_exposure,
@@ -60,6 +82,15 @@ def optimize(request: OptimizeRequest):
             max_cash_borrow=request.max_cash_borrow,
             max_turnover=request.max_turnover,
             current_weights=request.current_weights,
+            latest_prices=latest_prices,
+            sector_metadata=sector_metadata,
+            sector_max_weights=request.sector_max_weights,
+            transaction_cost_rate=request.transaction_cost_rate,
+            average_daily_dollar_volume=average_daily_dollar_volume,
+            market_impact_coefficient=request.market_impact_coefficient,
+            total_amount=request.total_amount,
+            max_positions=request.max_positions,
+            min_position_weight=request.min_position_weight,
         )
         efficient_frontier = generate_efficient_frontier(
             mu=mu,

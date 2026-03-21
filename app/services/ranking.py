@@ -14,15 +14,21 @@ MODEL_DESCRIPTIONS_DEFAULT = {
     "MeanVariance": "Classic Markowitz mean-variance optimization with target return. Best for moderate investors.",
     "EqualWeight": "Simple equal allocation to all assets. Robust baseline with no optimization.",
     "RiskParity": "Equalizes risk contributions from each asset. Good for risk-balanced diversification.",
+    "FactorUtilityMaximization": "Utility maximization using a factor-implied covariance matrix.",
+    "FactorVarianceConstraint": "Mean-variance optimization using a factor-implied covariance matrix.",
+    "SectorAllocation": "Mean-variance optimization with sector concentration caps.",
+    "TransactionCostRebalancing": "Rebalancing model with explicit proportional trading costs.",
+    "CardinalityMinBuyIn": "Cardinality-constrained mean-variance optimization with minimum buy-in rules.",
+    "RoundLotAllocation": "Integer lot-based allocation using latest prices and a cash remainder.",
 }
 
 BASE_ORDER = {
-    "low": ["MinimumVariance", "EqualWeight", "RiskParity", "TurnoverConstrained", "UtilityMaximization", "MeanVariance", "MaxSharpeRatio", "LeverageBorrowing", "LeverageShortSelling", "MaximumReturn"],
-    "medium": ["MaxSharpeRatio", "UtilityMaximization", "MeanVariance", "RiskParity", "TurnoverConstrained", "MinimumVariance", "EqualWeight", "LeverageBorrowing", "LeverageShortSelling", "MaximumReturn"],
-    "high": ["MaximumReturn", "LeverageBorrowing", "LeverageShortSelling", "UtilityMaximization", "MaxSharpeRatio", "MeanVariance", "RiskParity", "TurnoverConstrained", "EqualWeight", "MinimumVariance"],
+    "low": ["MinimumVariance", "EqualWeight", "RiskParity", "RoundLotAllocation", "TransactionCostRebalancing", "CardinalityMinBuyIn", "SectorAllocation", "FactorVarianceConstraint", "FactorUtilityMaximization", "TurnoverConstrained", "UtilityMaximization", "MeanVariance", "MaxSharpeRatio", "LeverageBorrowing", "LeverageShortSelling", "MaximumReturn"],
+    "medium": ["MaxSharpeRatio", "UtilityMaximization", "MeanVariance", "RiskParity", "RoundLotAllocation", "FactorVarianceConstraint", "FactorUtilityMaximization", "TransactionCostRebalancing", "SectorAllocation", "TurnoverConstrained", "MinimumVariance", "EqualWeight", "CardinalityMinBuyIn", "LeverageBorrowing", "LeverageShortSelling", "MaximumReturn"],
+    "high": ["MaximumReturn", "LeverageBorrowing", "LeverageShortSelling", "UtilityMaximization", "MaxSharpeRatio", "MeanVariance", "FactorUtilityMaximization", "FactorVarianceConstraint", "TransactionCostRebalancing", "SectorAllocation", "RoundLotAllocation", "RiskParity", "TurnoverConstrained", "EqualWeight", "CardinalityMinBuyIn", "MinimumVariance"],
 }
 
-BASE_SCORES = [100, 90, 80, 75, 65, 55, 45, 35, 25, 15]
+BASE_SCORES = [100, 95, 90, 85, 82, 78, 74, 70, 66, 62, 58, 54, 50, 40, 30, 20]
 
 HORIZON_ADJUSTMENTS = {
     "MinimumVariance": {"short": +15, "long": -10},
@@ -35,6 +41,12 @@ HORIZON_ADJUSTMENTS = {
     "MaxSharpeRatio": {"short": -5, "long": +10},
     "MeanVariance": {"short": 0, "long": 0},
     "RiskParity": {"short": 0, "long": 0},
+    "FactorUtilityMaximization": {"short": -5, "long": +5},
+    "FactorVarianceConstraint": {"short": 0, "long": +5},
+    "SectorAllocation": {"short": 0, "long": +5},
+    "TransactionCostRebalancing": {"short": +5, "long": +10},
+    "CardinalityMinBuyIn": {"short": 0, "long": +5},
+    "RoundLotAllocation": {"short": +5, "long": 0},
 }
 
 REASONING_TEMPLATES = {
@@ -74,6 +86,24 @@ REASONING_TEMPLATES = {
     "RiskParity": (
         "Equalizes risk contributions across assets - suitable for medium risk tolerance ({rt}/10) "
         "and balanced exposure over {h} months."
+    ),
+    "FactorUtilityMaximization": (
+        "Uses a factor-implied covariance structure with explicit utility maximization - useful when factor risk estimates are available."
+    ),
+    "FactorVarianceConstraint": (
+        "Uses a factor-implied covariance structure under a variance constraint - helpful when factor risk modeling is preferred."
+    ),
+    "SectorAllocation": (
+        "Applies sector concentration limits while preserving mean-variance discipline - good when diversification across sectors matters."
+    ),
+    "TransactionCostRebalancing": (
+        "Rebalances from the current portfolio while explicitly penalizing trading costs - best when turnover and execution costs matter."
+    ),
+    "CardinalityMinBuyIn": (
+        "Constrains the number of holdings and enforces minimum position sizes - useful when portfolio breadth must be limited."
+    ),
+    "RoundLotAllocation": (
+        "Uses integer lot sizing with a cash remainder - best when discrete trading units are required."
     ),
 }
 

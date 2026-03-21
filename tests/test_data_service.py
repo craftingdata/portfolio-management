@@ -103,3 +103,51 @@ def test_get_market_data_falls_back_to_synthetic_for_non_auth_failure(monkeypatc
     assert actual[1].equals(expected[1])
     assert np.allclose(actual[2], expected[2])
     assert np.allclose(actual[3], expected[3])
+
+
+def test_get_market_metadata_uses_profile_endpoint(monkeypatch):
+    payload = [
+        {
+            "symbol": "AAPL",
+            "companyName": "Apple Inc.",
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+            "exchangeShortName": "NASDAQ",
+            "assetType": "Equity",
+            "isEtf": False,
+        }
+    ]
+
+    captured_urls = []
+
+    def fake_get(url, params, timeout):
+        captured_urls.append(url)
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(data_service, "get_fmp_api_key", lambda: "test-fmp-key")
+    monkeypatch.setattr(data_service.httpx, "get", fake_get)
+
+    metadata = data_service.get_market_metadata(["AAPL"])
+
+    assert metadata["AAPL"]["sector"] == "Technology"
+    assert metadata["AAPL"]["industry"] == "Consumer Electronics"
+    assert "/profile/AAPL" in captured_urls[0]
+
+
+def test_get_market_liquidity_uses_historical_volume(monkeypatch):
+    payload = {
+        "historical": [
+            {"date": "2024-01-05", "adjClose": 104.0, "volume": 1000},
+            {"date": "2024-01-04", "adjClose": 103.0, "volume": 1200},
+            {"date": "2024-01-03", "adjClose": 101.0, "volume": 1100},
+            {"date": "2024-01-02", "adjClose": 100.0, "volume": 900},
+        ]
+    }
+
+    monkeypatch.setattr(data_service, "get_fmp_api_key", lambda: "test-fmp-key")
+    monkeypatch.setattr(data_service.httpx, "get", lambda url, params, timeout: _FakeResponse(payload))
+
+    liquidity = data_service.get_market_liquidity(["AAPL"], period_months=1)
+
+    assert "AAPL" in liquidity
+    assert liquidity["AAPL"] > 0

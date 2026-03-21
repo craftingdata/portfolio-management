@@ -13,6 +13,11 @@ class OptimizeRequest(BaseModel):
     max_cash_borrow: Optional[float] = Field(0.25, ge=0.0, description="Maximum borrowable cash sleeve as a fraction of portfolio value")
     max_turnover: Optional[float] = Field(0.25, ge=0.0, description="Maximum total turnover relative to the starting portfolio")
     current_weights: Optional[Dict[str, float]] = Field(None, description="Current portfolio weights keyed by ticker for turnover-aware optimization")
+    transaction_cost_rate: Optional[float] = Field(0.001, ge=0.0, description="One-way proportional transaction cost rate")
+    market_impact_coefficient: Optional[float] = Field(0.025, ge=0.0, description="Linear market-impact coefficient applied to traded notional versus liquidity")
+    max_positions: Optional[int] = Field(None, ge=1, description="Maximum number of open positions for cardinality-constrained optimization")
+    min_position_weight: Optional[float] = Field(None, ge=0.0, description="Minimum portfolio weight for a newly opened position")
+    sector_max_weights: Optional[Dict[str, float]] = Field(None, description="Optional maximum sector weights keyed by normalized sector name")
 
     @field_validator("risk_tolerance", mode="before")
     @classmethod

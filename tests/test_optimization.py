@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pytest
 from app.services.optimization import (
     minimum_variance,
@@ -14,6 +15,12 @@ from app.services.optimization import (
     generate_efficient_frontier,
     run_all_models,
     compute_metrics,
+    factor_utility_maximization,
+    factor_variance_constraint,
+    sector_allocation_mean_variance,
+    transaction_cost_rebalancing,
+    cardinality_min_buy_in,
+    round_lot_allocation,
 )
 
 
@@ -36,6 +43,26 @@ def synthetic_data():
     ])
     sigma = np.outer(vols, vols) * corr
     return tickers, mu, sigma
+
+
+@pytest.fixture
+def price_frame_data():
+    tickers = ["AAPL", "MSFT", "GOOGL", "JPM", "SPY"]
+    np.random.seed(7)
+    n_days = 80
+    drift = np.array([0.0006, 0.0005, 0.0004, 0.0003, 0.0002])
+    vol = np.array([0.012, 0.011, 0.010, 0.009, 0.008])
+    prices = np.ones((n_days + 1, len(tickers))) * 100.0
+    for index in range(n_days):
+        returns = drift + vol * np.random.standard_normal(len(tickers))
+        prices[index + 1] = prices[index] * (1.0 + returns)
+
+    dates = pd.bdate_range("2024-01-01", periods=n_days + 1)
+    prices_df = pd.DataFrame(prices, index=dates, columns=tickers)
+    returns_df = prices_df.pct_change().dropna()
+    mu = returns_df.mean().to_numpy() * 252
+    sigma = returns_df.cov().to_numpy() * 252
+    return tickers, prices_df, returns_df, mu, sigma
 
 
 def assert_valid_portfolio(result, n):
@@ -188,3 +215,61 @@ def test_run_all_models(synthetic_data, risk_tol):
     n = len(mu)
     for model_name, result in results.items():
         assert_valid_portfolio(result, n)
+
+
+def test_factor_model_variants(price_frame_data):
+    tickers, prices_df, returns_df, mu, sigma = price_frame_data
+
+    utility_result = factor_utility_maximization(mu, returns_df, risk_aversion=1.5)
+    constraint_result = factor_variance_constraint(mu, returns_df, risk_level=0.5)
+
+    assert utility_result["model_name"] == "FactorUtilityMaximization"
+    assert constraint_result["model_name"] == "FactorVarianceConstraint"
+    assert_valid_portfolio(utility_result, len(mu))
+    assert_valid_portfolio(constraint_result, len(mu))
+
+
+def test_sector_allocation_transaction_cost_and_integer_models(price_frame_data):
+    tickers, prices_df, returns_df, mu, sigma = price_frame_data
+    sector_metadata = {
+        "AAPL": {"sector": "Technology"},
+        "MSFT": {"sector": "Technology"},
+        "GOOGL": {"sector": "Communication Services"},
+        "JPM": {"sector": "Financials"},
+        "SPY": {"sector": "ETF"},
+    }
+    sector_caps = {"technology": 0.6, "communication_services": 0.3, "financials": 0.4, "etf": 0.2}
+    latest_prices = prices_df.iloc[-1].to_numpy(dtype=float)
+
+    sector_result = sector_allocation_mean_variance(
+        mu,
+        sigma,
+        tickers,
+        sector_metadata,
+        sector_caps,
+        risk_level=0.5,
+    )
+    transaction_result = transaction_cost_rebalancing(
+        mu,
+        sigma,
+        current_weights=np.array([0.25, 0.25, 0.20, 0.15, 0.15]),
+        tickers=tickers,
+        risk_level=0.5,
+        transaction_cost_rate=0.001,
+        market_impact_coefficient=0.025,
+        average_daily_dollar_volume={ticker: 5_000_000.0 for ticker in tickers},
+        total_amount=100000.0,
+    )
+    cardinality_result = cardinality_min_buy_in(mu, sigma, max_positions=3, min_position_weight=0.05)
+    round_lot_result = round_lot_allocation(mu, sigma, latest_prices, total_amount=100000.0, risk_level=0.5)
+
+    assert sector_result["model_name"] == "SectorAllocation"
+    assert transaction_result["model_name"] == "TransactionCostRebalancing"
+    assert cardinality_result["model_name"] == "CardinalityMinBuyIn"
+    assert round_lot_result["model_name"] == "RoundLotAllocation"
+
+    assert_valid_portfolio(sector_result, len(mu))
+    assert_valid_portfolio(transaction_result, len(mu))
+    assert transaction_result["cash_weight"] >= 0.0
+    assert cardinality_result["open_positions"] <= 3
+    assert round_lot_result["cash_weight"] >= 0.0

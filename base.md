@@ -69,6 +69,7 @@ These items are complete and should be treated as the baseline, not reintroduced
 - Long-short leverage, borrowing/cash-sleeve leverage, and turnover-constrained optimization are implemented.
 - Ranking now uses realized portfolio outputs plus efficient-frontier context, not only static heuristics.
 - The API request model now includes leverage and turnover controls plus current weights for rebalance-aware optimization.
+- Factor-model utility/variance variants, sector-allocation limits, transaction-cost-aware rebalancing, cardinality/minimum-buy-in, and round-lot allocation are now implemented as optional advanced model families.
 - Synthetic data still exists, but only as a fallback for non-authentication FMP fetch failures.
 - Tests now cover the optimizer models, ranking behavior, API responses, FMP fetch behavior, Key Vault secret caching, estimator behavior, and API failure behavior when the FMP key is unavailable.
 
@@ -256,14 +257,19 @@ Current implemented optimizer techniques, based on repo code, are:
 - mean variance
 - equal weight
 - risk parity
+- factor-model utility maximization
+- factor-model variance constraint
+- sector allocation
+- transaction-cost-aware rebalancing
+- cardinality and minimum buy-in
+- round-lot allocation
 
-Current notable omissions, based on repo code, are:
+Current notable omissions, based on repo code, are now limited to further calibration and enrichment work rather than missing core model families:
 
-- factor-risk formulations
-- discrete constraint families
-- cost-aware optimization
-- market-impact modeling
-- metadata-driven sector constraints
+- richer factor families beyond the current market-factor proxy
+- more detailed liquidity and market-impact calibration
+- broader provider metadata beyond sector and industry
+- transaction-cost calibration beyond the default proportional assumptions
 
 Review finding:
 

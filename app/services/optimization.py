@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from typing import Dict, List, Optional
 import logging
 
@@ -12,6 +13,13 @@ def compute_metrics(weights: np.ndarray, mu: np.ndarray, sigma: np.ndarray, risk
     expected_risk = float(np.sqrt(max(variance, 1e-10)))
     sharpe_ratio = float((expected_return - risk_free_rate) / expected_risk) if expected_risk > 1e-10 else 0.0
     return expected_return, expected_risk, sharpe_ratio
+
+
+def _ensure_positive_semidefinite(matrix: np.ndarray) -> np.ndarray:
+    eigvals = np.linalg.eigvalsh(matrix)
+    if eigvals.min() < 1e-8:
+        matrix = matrix + (abs(eigvals.min()) + 1e-6) * np.eye(len(matrix))
+    return matrix
 
 
 def _normalize_weights(weights: np.ndarray) -> np.ndarray:
@@ -713,6 +721,7 @@ def run_all_models(
     mu: np.ndarray,
     sigma: np.ndarray,
     tickers: List[str],
+    returns_df: Optional[pd.DataFrame] = None,
     risk_tolerance_normalized: float = 5.0,
     risk_free_rate: float = 0.04,
     max_gross_exposure: float = 1.5,
@@ -720,6 +729,15 @@ def run_all_models(
     max_cash_borrow: float = 0.25,
     max_turnover: float = 0.25,
     current_weights: Optional[Dict[str, float]] = None,
+    latest_prices: Optional[np.ndarray] = None,
+    sector_metadata: Optional[Dict[str, Dict[str, str]]] = None,
+    sector_max_weights: Optional[Dict[str, float]] = None,
+    transaction_cost_rate: Optional[float] = None,
+    average_daily_dollar_volume: Optional[Dict[str, float]] = None,
+    market_impact_coefficient: Optional[float] = None,
+    total_amount: float = 1.0,
+    max_positions: Optional[int] = None,
+    min_position_weight: Optional[float] = None,
 ) -> dict:
     """
     Run all core portfolio optimization models.
@@ -741,6 +759,12 @@ def run_all_models(
         mean_variance: "MeanVariance",
         equal_weight: "EqualWeight",
         risk_parity: "RiskParity",
+        factor_utility_maximization: "FactorUtilityMaximization",
+        factor_variance_constraint: "FactorVarianceConstraint",
+        sector_allocation_mean_variance: "SectorAllocation",
+        transaction_cost_rebalancing: "TransactionCostRebalancing",
+        cardinality_min_buy_in: "CardinalityMinBuyIn",
+        round_lot_allocation: "RoundLotAllocation",
     }
 
     current_weight_vector = None
@@ -797,6 +821,67 @@ def run_all_models(
         (risk_parity, {"mu": mu, "sigma": sigma, "risk_free_rate": risk_free_rate}),
     ]
 
+    if returns_df is not None:
+        model_specs.extend([
+            (factor_utility_maximization, {
+                "mu": mu,
+                "returns_df": returns_df,
+                "risk_aversion": _risk_aversion_from_risk_level(risk_level),
+                "risk_free_rate": risk_free_rate,
+            }),
+            (factor_variance_constraint, {
+                "mu": mu,
+                "returns_df": returns_df,
+                "risk_level": risk_level,
+                "risk_free_rate": risk_free_rate,
+            }),
+        ])
+
+    if sector_metadata and sector_max_weights:
+        model_specs.append((sector_allocation_mean_variance, {
+            "mu": mu,
+            "sigma": sigma,
+            "tickers": tickers,
+            "sector_metadata": sector_metadata,
+            "sector_max_weights": sector_max_weights,
+            "risk_level": risk_level,
+            "risk_free_rate": risk_free_rate,
+        }))
+
+    if current_weight_vector is not None and transaction_cost_rate is not None:
+        model_specs.append((transaction_cost_rebalancing, {
+            "mu": mu,
+            "sigma": sigma,
+            "current_weights": current_weight_vector,
+            "tickers": tickers,
+            "risk_level": risk_level,
+            "transaction_cost_rate": transaction_cost_rate,
+            "market_impact_coefficient": float(max(market_impact_coefficient or 0.0, 0.0)),
+            "average_daily_dollar_volume": average_daily_dollar_volume,
+            "total_amount": total_amount,
+            "risk_free_rate": risk_free_rate,
+        }))
+
+    if max_positions is not None:
+        model_specs.append((cardinality_min_buy_in, {
+            "mu": mu,
+            "sigma": sigma,
+            "max_positions": max_positions,
+            "min_position_weight": float(min_position_weight or 0.0),
+            "risk_level": risk_level,
+            "risk_free_rate": risk_free_rate,
+        }))
+
+    if latest_prices is not None:
+        model_specs.append((round_lot_allocation, {
+            "mu": mu,
+            "sigma": sigma,
+            "latest_prices": latest_prices,
+            "total_amount": total_amount,
+            "risk_level": risk_level,
+            "risk_free_rate": risk_free_rate,
+        }))
+
     for model_fn, kwargs in model_specs:
         try:
             result = model_fn(**kwargs)
@@ -815,3 +900,380 @@ def run_all_models(
             }
 
     return results
+
+
+def _build_market_factor_components(returns_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    returns_df = returns_df.dropna(axis=0, how="any")
+    if returns_df.empty or returns_df.shape[1] < 2:
+        raise ValueError("Factor model requires at least two aligned return series")
+
+    factor_returns = returns_df.mean(axis=1).astype(float)
+    factor_values = factor_returns.to_numpy(dtype=float)
+    factor_variance = float(max(np.var(factor_values, ddof=1) * 252.0, 1e-10))
+    factor_covariance = np.array([[factor_variance]], dtype=float)
+
+    exposures = []
+    specific_variances = []
+    factor_sample_variance = float(max(np.var(factor_values, ddof=1), 1e-10))
+
+    for column in returns_df.columns:
+        asset_values = returns_df[column].to_numpy(dtype=float)
+        if len(asset_values) != len(factor_values):
+            raise ValueError("Factor model inputs must be aligned")
+        covariance = float(np.cov(asset_values, factor_values, ddof=1)[0, 1])
+        beta = covariance / factor_sample_variance
+        residuals = asset_values - beta * factor_values
+        exposures.append(beta)
+        specific_variances.append(float(max(np.var(residuals, ddof=1) * 252.0, 1e-10)))
+
+    exposure_matrix = np.array(exposures, dtype=float).reshape(-1, 1)
+    specific_matrix = np.diag(np.array(specific_variances, dtype=float))
+    implied_covariance = exposure_matrix @ factor_covariance @ exposure_matrix.T + specific_matrix
+    implied_covariance = _ensure_positive_semidefinite(implied_covariance)
+    return exposure_matrix, factor_covariance, specific_matrix, implied_covariance
+
+
+def factor_utility_maximization(
+    mu: np.ndarray,
+    returns_df: pd.DataFrame,
+    risk_aversion: float = 1.0,
+    risk_free_rate: float = 0.04,
+) -> dict:
+    exposures, factor_covariance, specific_matrix, implied_covariance = _build_market_factor_components(returns_df)
+    result = utility_maximization(mu, implied_covariance, risk_aversion=risk_aversion, risk_free_rate=risk_free_rate)
+    result["model_name"] = "FactorUtilityMaximization"
+    result["factor_exposures"] = exposures
+    result["factor_covariance"] = factor_covariance
+    result["specific_risk"] = specific_matrix
+    return result
+
+
+def factor_variance_constraint(
+    mu: np.ndarray,
+    returns_df: pd.DataFrame,
+    risk_level: float = 0.5,
+    risk_free_rate: float = 0.04,
+) -> dict:
+    exposures, factor_covariance, specific_matrix, implied_covariance = _build_market_factor_components(returns_df)
+    result = mean_variance(mu, implied_covariance, risk_level=risk_level, risk_free_rate=risk_free_rate)
+    result["model_name"] = "FactorVarianceConstraint"
+    result["factor_exposures"] = exposures
+    result["factor_covariance"] = factor_covariance
+    result["specific_risk"] = specific_matrix
+    return result
+
+
+def _normalized_sector_name(value: Optional[str]) -> str:
+    if not value:
+        return "Unknown"
+    return str(value).strip().lower().replace("/", "_").replace(" ", "_")
+
+
+def sector_allocation_mean_variance(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    tickers: List[str],
+    sector_metadata: Dict[str, Dict[str, str]],
+    sector_max_weights: Dict[str, float],
+    risk_level: float = 0.5,
+    risk_free_rate: float = 0.04,
+) -> dict:
+    if not sector_metadata:
+        raise ValueError("Sector metadata is required for sector-constrained optimization")
+    if not sector_max_weights:
+        raise ValueError("Sector limits are required for sector-constrained optimization")
+
+    sector_limits = {_normalized_sector_name(sector): float(limit) for sector, limit in sector_max_weights.items()}
+    sector_map = {
+        ticker: _normalized_sector_name(sector_metadata.get(ticker, {}).get("sector"))
+        for ticker in tickers
+    }
+
+    n = len(mu)
+    target_return = float(np.min(mu) + (np.max(mu) - np.min(mu)) * risk_level)
+    weights = None
+
+    try:
+        from pyscipopt import Model, quicksum
+
+        model = Model()
+        model.hideOutput()
+        x = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"x_{i}") for i in range(n)]
+        model.setObjective(quicksum(sigma[i, j] * x[i] * x[j] for i in range(n) for j in range(n)), "minimize")
+        model.addCons(quicksum(x[i] for i in range(n)) == 1.0)
+        model.addCons(quicksum(mu[i] * x[i] for i in range(n)) >= target_return)
+
+        for sector_name, limit in sector_limits.items():
+            sector_indices = [index for index, ticker in enumerate(tickers) if sector_map.get(ticker) == sector_name]
+            if sector_indices:
+                model.addCons(quicksum(x[index] for index in sector_indices) <= limit)
+
+        model.optimize()
+        if model.getStatus() == "optimal":
+            weights = _normalize_weights([model.getVal(x[i]) for i in range(n)])
+        else:
+            raise ValueError(f"SCIP status: {model.getStatus()}")
+    except Exception as exc:
+        logger.warning("SectorAllocation SCIP failed (%s), falling back to scipy", exc)
+        from scipy.optimize import minimize
+
+        x0 = np.ones(n) / n
+        constraints = [
+            {"type": "eq", "fun": lambda x: np.sum(x) - 1.0},
+            {"type": "ineq", "fun": lambda x: float(mu @ x) - target_return},
+        ]
+        for sector_name, limit in sector_limits.items():
+            sector_indices = [index for index, ticker in enumerate(tickers) if sector_map.get(ticker) == sector_name]
+            if sector_indices:
+                constraints.append({"type": "ineq", "fun": lambda x, indices=sector_indices, cap=limit: cap - float(np.sum(x[indices]))})
+
+        bounds = [(0.0, 1.0)] * n
+        result = minimize(
+            lambda x: float(x @ sigma @ x),
+            x0,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+            options={"ftol": 1e-9, "maxiter": 2000},
+        )
+        weights = _normalize_weights(result.x)
+
+    expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
+    sector_weights = {}
+    for ticker, weight in zip(tickers, weights):
+        sector = sector_map.get(ticker, "unknown")
+        sector_weights[sector] = sector_weights.get(sector, 0.0) + float(weight)
+
+    return {
+        "model_name": "SectorAllocation",
+        "weights": weights,
+        "expected_return": expected_return,
+        "expected_risk": expected_risk,
+        "sharpe_ratio": sharpe_ratio,
+        "sector_weights": sector_weights,
+    }
+
+
+def transaction_cost_rebalancing(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    current_weights: np.ndarray,
+    tickers: Optional[List[str]] = None,
+    risk_level: float = 0.5,
+    transaction_cost_rate: float = 0.001,
+    market_impact_coefficient: float = 0.0,
+    average_daily_dollar_volume: Optional[Dict[str, float]] = None,
+    total_amount: float = 1.0,
+    risk_free_rate: float = 0.04,
+) -> dict:
+    n = len(mu)
+    current_vector = _normalize_weights(np.array(current_weights, dtype=float))
+    transaction_cost_rate = float(max(transaction_cost_rate, 0.0))
+    market_impact_coefficient = float(max(market_impact_coefficient, 0.0))
+    total_amount = float(max(total_amount, 1e-8))
+    target_return = float(np.min(mu) + (np.max(mu) - np.min(mu)) * risk_level)
+    penalties = np.full(n, transaction_cost_rate, dtype=float)
+    if average_daily_dollar_volume:
+        ordered_tickers = tickers if tickers is not None else list(average_daily_dollar_volume.keys())
+        for index, ticker in enumerate(ordered_tickers):
+            adv = float(max(float(average_daily_dollar_volume.get(ticker, 5_000_000.0)), 5_000_000.0))
+            penalties[index] += market_impact_coefficient * (total_amount / adv)
+
+    weights = None
+    trade_cost = 0.0
+
+    try:
+        from pyscipopt import Model, quicksum
+
+        model = Model()
+        model.hideOutput()
+        x = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"x_{i}") for i in range(n)]
+        buy = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"buy_{i}") for i in range(n)]
+        sell = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"sell_{i}") for i in range(n)]
+
+        utility = quicksum(mu[i] * x[i] for i in range(n)) - 0.5 * _risk_aversion_from_risk_level(risk_level) * quicksum(
+            sigma[i, j] * x[i] * x[j] for i in range(n) for j in range(n)
+        )
+        model.setObjective(utility, "maximize")
+        model.addCons(quicksum(mu[i] * x[i] for i in range(n)) >= target_return)
+
+        for index in range(n):
+            model.addCons(x[index] == current_vector[index] + buy[index] - sell[index])
+
+        model.addCons(quicksum(x[index] for index in range(n)) + quicksum(penalties[index] * (buy[index] + sell[index]) for index in range(n)) <= 1.0)
+        model.optimize()
+
+        if model.getStatus() == "optimal":
+            weights = _normalize_weights([model.getVal(x[index]) for index in range(n)])
+            trade_cost = float(sum(penalties[index] * (model.getVal(buy[index]) + model.getVal(sell[index])) for index in range(n)))
+        else:
+            raise ValueError(f"SCIP status: {model.getStatus()}")
+    except Exception as exc:
+        logger.warning("TransactionCostRebalancing SCIP failed (%s), falling back to scipy", exc)
+        from scipy.optimize import minimize
+
+        x0 = np.array(current_vector, dtype=float)
+
+        def objective(x: np.ndarray) -> float:
+            x = np.array(x, dtype=float)
+            turnover = np.sum(np.abs(x - current_vector))
+            utility = float(mu @ x) - 0.5 * _risk_aversion_from_risk_level(risk_level) * float(x @ sigma @ x)
+            return -(utility - float(np.mean(penalties)) * turnover)
+
+        constraints = [
+            {"type": "eq", "fun": lambda x: np.sum(x) - 1.0},
+            {"type": "ineq", "fun": lambda x: float(mu @ x) - target_return},
+        ]
+        bounds = [(0.0, 1.0)] * n
+        result = minimize(
+            objective,
+            x0,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+            options={"ftol": 1e-9, "maxiter": 2000},
+        )
+        weights = _normalize_weights(result.x)
+        trade_cost = float(np.mean(penalties) * np.sum(np.abs(weights - current_vector)))
+
+    expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
+    cash_weight = float(max(0.0, 1.0 - float(np.sum(weights))))
+    realized_expected_return = float(expected_return + cash_weight * risk_free_rate - trade_cost)
+    realized_sharpe = float((realized_expected_return - risk_free_rate) / expected_risk) if expected_risk > 1e-10 else 0.0
+
+    return {
+        "model_name": "TransactionCostRebalancing",
+        "weights": weights,
+        "cash_weight": cash_weight,
+        "trade_cost": trade_cost,
+        "expected_return": realized_expected_return,
+        "expected_risk": expected_risk,
+        "sharpe_ratio": realized_sharpe,
+    }
+
+
+def cardinality_min_buy_in(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    max_positions: int,
+    min_position_weight: float = 0.0,
+    risk_level: float = 0.5,
+    risk_free_rate: float = 0.04,
+) -> dict:
+    n = len(mu)
+    max_positions = int(max(max_positions, 1))
+    min_position_weight = float(max(min_position_weight, 0.0))
+    target_return = float(np.min(mu) + (np.max(mu) - np.min(mu)) * risk_level)
+    weights = None
+
+    try:
+        from pyscipopt import Model, quicksum
+
+        model = Model()
+        model.hideOutput()
+        x = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"x_{i}") for i in range(n)]
+        active = [model.addVar(lb=0.0, ub=1.0, vtype="B", name=f"active_{i}") for i in range(n)]
+
+        model.setObjective(quicksum(sigma[i, j] * x[i] * x[j] for i in range(n) for j in range(n)), "minimize")
+        model.addCons(quicksum(x[i] for i in range(n)) == 1.0)
+        model.addCons(quicksum(mu[i] * x[i] for i in range(n)) >= target_return)
+        model.addCons(quicksum(active[i] for i in range(n)) <= max_positions)
+
+        for index in range(n):
+            model.addCons(x[index] <= active[index])
+            if min_position_weight > 0.0:
+                model.addCons(x[index] >= min_position_weight * active[index])
+
+        model.optimize()
+        if model.getStatus() == "optimal":
+            weights = _normalize_weights([model.getVal(x[index]) for index in range(n)])
+        else:
+            raise ValueError(f"SCIP status: {model.getStatus()}")
+    except Exception as exc:
+        logger.warning("CardinalityMinBuyIn SCIP failed (%s), falling back to scipy", exc)
+        weights = mean_variance(mu, sigma, risk_level=risk_level, risk_free_rate=risk_free_rate)["weights"]
+        largest_indices = np.argsort(weights)[::-1][:max_positions]
+        constrained = np.zeros_like(weights)
+        constrained[largest_indices] = weights[largest_indices]
+        if min_position_weight > 0.0:
+            constrained[constrained > 0.0] = np.maximum(constrained[constrained > 0.0], min_position_weight)
+        weights = _normalize_weights(constrained)
+
+    expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
+    return {
+        "model_name": "CardinalityMinBuyIn",
+        "weights": weights,
+        "expected_return": expected_return,
+        "expected_risk": expected_risk,
+        "sharpe_ratio": sharpe_ratio,
+        "open_positions": int(np.sum(weights > 1e-8)),
+    }
+
+
+def round_lot_allocation(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    latest_prices: np.ndarray,
+    total_amount: float,
+    risk_level: float = 0.5,
+    lot_sizes: Optional[np.ndarray] = None,
+    risk_free_rate: float = 0.04,
+) -> dict:
+    n = len(mu)
+    total_amount = float(max(total_amount, 1e-8))
+    latest_prices = np.array(latest_prices, dtype=float)
+    if latest_prices.shape[0] != n:
+        raise ValueError("latest_prices must align with mu and sigma")
+    if lot_sizes is None:
+        lot_sizes = np.ones(n, dtype=float)
+    else:
+        lot_sizes = np.array(lot_sizes, dtype=float)
+        if lot_sizes.shape[0] != n:
+            raise ValueError("lot_sizes must align with mu and sigma")
+
+    target_return = float(np.min(mu) + (np.max(mu) - np.min(mu)) * risk_level)
+    weights = None
+    shares = None
+
+    try:
+        from pyscipopt import Model, quicksum
+
+        model = Model()
+        model.hideOutput()
+        units = [model.addVar(lb=0.0, ub=1e6, vtype="I", name=f"units_{i}") for i in range(n)]
+        x = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"x_{i}") for i in range(n)]
+
+        model.setObjective(quicksum(sigma[i, j] * x[i] * x[j] for i in range(n) for j in range(n)), "minimize")
+        model.addCons(quicksum(x[i] for i in range(n)) <= 1.0)
+        model.addCons(quicksum(mu[i] * x[i] for i in range(n)) >= target_return)
+
+        for index in range(n):
+            model.addCons(x[index] == (latest_prices[index] * lot_sizes[index] * units[index]) / total_amount)
+
+        model.addCons(quicksum(latest_prices[index] * lot_sizes[index] * units[index] for index in range(n)) <= total_amount)
+        model.optimize()
+
+        if model.getStatus() == "optimal":
+            shares = np.array([model.getVal(units[index]) for index in range(n)], dtype=float)
+            weights = np.array([model.getVal(x[index]) for index in range(n)], dtype=float)
+        else:
+            raise ValueError(f"SCIP status: {model.getStatus()}")
+    except Exception as exc:
+        logger.warning("RoundLotAllocation SCIP failed (%s), falling back to scipy", exc)
+        continuous = mean_variance(mu, sigma, risk_level=risk_level, risk_free_rate=risk_free_rate)["weights"]
+        notional = total_amount * continuous
+        shares = np.floor(notional / np.maximum(latest_prices * lot_sizes, 1e-8))
+        invested = shares * latest_prices * lot_sizes
+        weights = invested / total_amount
+
+    cash_weight = float(max(0.0, 1.0 - float(np.sum(weights))))
+    expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
+    return {
+        "model_name": "RoundLotAllocation",
+        "weights": weights,
+        "cash_weight": cash_weight,
+        "shares": shares,
+        "expected_return": expected_return + cash_weight * risk_free_rate,
+        "expected_risk": expected_risk,
+        "sharpe_ratio": sharpe_ratio,
+    }

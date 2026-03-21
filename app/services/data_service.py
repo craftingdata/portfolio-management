@@ -1,7 +1,7 @@
 import logging
 import os
 from datetime import date
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
@@ -66,6 +66,21 @@ def _fetch_fmp_prices(
     api_key: str,
 ) -> pd.Series:
     """Fetch adjusted close prices for a single ticker from FMP."""
+    history_df = _fetch_fmp_history(ticker, start_date=start_date, end_date=end_date, api_key=api_key)
+    price_column = "adjClose" if "adjClose" in history_df.columns else "close"
+    series = history_df[["date", price_column]].copy()
+    series["date"] = pd.to_datetime(series["date"])
+    series = series.sort_values("date").set_index("date")[price_column]
+    series.name = ticker
+    return series.astype(float)
+
+
+def _fetch_fmp_history(
+    ticker: str,
+    start_date: date,
+    end_date: date,
+    api_key: str,
+) -> pd.DataFrame:
     response = httpx.get(
         f"{FMP_BASE_URL}/historical-price-full/{ticker}",
         params={
@@ -90,11 +105,25 @@ def _fetch_fmp_prices(
     if price_column not in history_df.columns:
         raise ValueError(f"FMP payload missing price field for {ticker}")
 
-    series = history_df[["date", price_column]].copy()
-    series["date"] = pd.to_datetime(series["date"])
-    series = series.sort_values("date").set_index("date")[price_column]
-    series.name = ticker
-    return series.astype(float)
+    history_df = history_df.copy()
+    history_df["date"] = pd.to_datetime(history_df["date"])
+    history_df = history_df.sort_values("date")
+    return history_df
+
+
+def _fetch_fmp_average_daily_dollar_volume(
+    ticker: str,
+    start_date: date,
+    end_date: date,
+    api_key: str,
+) -> float:
+    history_df = _fetch_fmp_history(ticker, start_date=start_date, end_date=end_date, api_key=api_key)
+    price_column = "adjClose" if "adjClose" in history_df.columns else "close"
+    if "volume" not in history_df.columns:
+        raise ValueError(f"FMP payload missing volume field for {ticker}")
+
+    dollar_volume = history_df[price_column].astype(float) * history_df["volume"].astype(float)
+    return float(max(dollar_volume.mean(), 0.0))
 
 
 def _fetch_fmp_market_data(
@@ -126,6 +155,74 @@ def _fetch_fmp_market_data(
 
     logger.info("Successfully fetched FMP data for %s over %s days", list(prices_df.columns), len(prices_df))
     return prices_df, estimated.returns_df, estimated.mu, estimated.sigma_matrix
+
+
+def get_market_metadata(
+    tickers: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, str]]:
+    """Fetch company profile metadata for tickers from FMP."""
+    if tickers is None:
+        tickers = DEFAULT_TICKERS
+
+    tickers = [t.upper().strip() for t in tickers]
+    api_key = get_fmp_api_key()
+    if not api_key:
+        raise MissingFMPAPIKeyError(
+            "FMP API key is unavailable. Azure Key Vault secret retrieval must succeed before metadata can be fetched."
+        )
+
+    metadata: Dict[str, Dict[str, str]] = {}
+    for ticker in tickers:
+        response = httpx.get(
+            f"{FMP_BASE_URL}/profile/{ticker}",
+            params={"apikey": api_key},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        profile = payload[0] if isinstance(payload, list) and payload else payload.get("profile", [{}])[0] if isinstance(payload, dict) and "profile" in payload else payload
+        if isinstance(profile, list) and profile:
+            profile = profile[0]
+        metadata[ticker] = {
+            "symbol": str(profile.get("symbol", ticker)),
+            "companyName": str(profile.get("companyName", ticker)),
+            "sector": str(profile.get("sector", "Unknown")),
+            "industry": str(profile.get("industry", "Unknown")),
+            "exchange": str(profile.get("exchangeShortName", profile.get("exchange", ""))),
+            "assetType": str(profile.get("assetType", profile.get("type", "Equity"))),
+            "isEtf": str(profile.get("isEtf", False)),
+        }
+
+    return metadata
+
+
+def get_market_liquidity(
+    tickers: Optional[List[str]] = None,
+    period_months: int = 36,
+) -> Dict[str, float]:
+    """Fetch average daily dollar volume for each ticker using the historical FMP endpoint."""
+    if tickers is None:
+        tickers = DEFAULT_TICKERS
+
+    tickers = [t.upper().strip() for t in tickers]
+    api_key = get_fmp_api_key()
+    if not api_key:
+        raise MissingFMPAPIKeyError(
+            "FMP API key is unavailable. Azure Key Vault secret retrieval must succeed before liquidity can be fetched."
+        )
+
+    end_date = pd.Timestamp.today().date()
+    start_date = (pd.Timestamp.today() - pd.DateOffset(months=period_months)).date()
+
+    liquidity: Dict[str, float] = {}
+    for ticker in tickers:
+        liquidity[ticker] = _fetch_fmp_average_daily_dollar_volume(
+            ticker,
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key,
+        )
+    return liquidity
 
 
 def _generate_synthetic_data(tickers: List[str], n_days: int = 756) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
