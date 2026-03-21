@@ -85,8 +85,16 @@ Models are ranked by an **applicability score** (0–100) computed from:
 
 ## Market Data
 
-- **Primary**: Historical price data fetched via [yfinance](https://github.com/ranaroussi/yfinance).
-- **Fallback**: If yfinance is unavailable, synthetic data is generated using geometric Brownian motion with realistic parameters per asset class.
+- **Primary**: Historical price data fetched from FMP using an API key stored in Azure Key Vault.
+- **Authentication**: The application reads the FMP API key from Azure Key Vault via `DefaultAzureCredential`, which works with local `az login` sessions.
+- **Missing key behavior**: If the FMP API key cannot be retrieved from Azure Key Vault, the request fails loudly instead of falling back to synthetic data.
+- **Fallback**: Synthetic data is only used for non-authentication FMP fetch failures.
+
+Environment variables:
+
+- `AZURE_KEYVAULT_NAME` default: `rajesh-invest`
+- `FMP_API_SECRET_NAME` default: `fmpapi`
+- `FMP_BASE_URL` default: `https://financialmodelingprep.com/api/v3`
 
 Default tickers: `AAPL, MSFT, GOOGL, AMZN, META, TSLA, JPM, JNJ, PG, KO, SPY, QQQ, IEF, GLD, VNQ`
 
@@ -118,11 +126,10 @@ app/
 ├── models/
 │   └── schemas.py        # Pydantic request/response schemas
 └── services/
-    ├── data_service.py   # Market data fetching (yfinance + synthetic fallback)
+  ├── data_service.py   # Market data fetching (FMP + Azure Key Vault + synthetic fallback)
     ├── optimization.py   # SCIP-based portfolio optimization models
     └── ranking.py        # Applicability scoring and ranking
 tests/
 ├── test_optimization.py  # Unit tests for each optimization model
 └── test_api.py           # Integration tests for the API endpoints
-requirements.txt
 ```

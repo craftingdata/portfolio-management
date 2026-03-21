@@ -42,7 +42,8 @@ def _make_mock_market_data(tickers=None, period_months=36):
         ret = daily_returns + daily_vols * np.random.standard_normal(n)
         prices[t + 1] = prices[t] * (1 + ret)
 
-    dates = pd.bdate_range(end=pd.Timestamp.today(), periods=n_days + 1)
+    start_date = pd.Timestamp.today().normalize() - pd.offsets.BDay(n_days)
+    dates = pd.bdate_range(start=start_date, periods=n_days + 1)
     prices_df = pd.DataFrame(prices, index=dates, columns=tickers)
     returns_df = prices_df.pct_change().dropna()
 
@@ -151,6 +152,18 @@ def test_validation_invalid_risk_tolerance(client):
         "investment_horizon": "medium",
     })
     assert response.status_code == 422
+
+
+def test_optimize_returns_500_when_api_key_missing(client):
+    with patch("app.main.get_market_data", side_effect=RuntimeError("FMP API key is unavailable")):
+        response = client.post("/optimize", json={
+            "total_amount": 100000,
+            "risk_tolerance": "medium",
+            "investment_horizon": "medium",
+        })
+
+    assert response.status_code == 500
+    assert "FMP API key is unavailable" in response.json()["detail"]
 
 
 def test_portfolio_fields(client):

@@ -1,15 +1,131 @@
+import logging
+import os
+from datetime import date
+from typing import List, Optional, Tuple
+
+import httpx
 import numpy as np
 import pandas as pd
-from typing import List, Optional, Tuple
-import logging
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import KeyVaultSecret, SecretClient
+
+from app.services.estimation import estimate_market_inputs
 
 logger = logging.getLogger(__name__)
+
+AZURE_KEYVAULT_NAME = os.getenv("AZURE_KEYVAULT_NAME", "rajesh-invest")
+FMP_API_SECRET_NAME = os.getenv("FMP_API_SECRET_NAME", "fmpapi")
+FMP_BASE_URL = os.getenv("FMP_BASE_URL", "https://financialmodelingprep.com/api/v3")
+
+_fmp_secret_cache: Optional[KeyVaultSecret] = None
+
+
+class MissingFMPAPIKeyError(RuntimeError):
+    """Raised when the FMP API key cannot be retrieved from Azure Key Vault."""
 
 DEFAULT_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "META",
     "TSLA", "JPM", "JNJ", "PG", "KO",
     "SPY", "QQQ", "IEF", "GLD", "VNQ"
 ]
+
+
+def get_fmp_api_secret() -> Optional[KeyVaultSecret]:
+    """Retrieve the FMP API secret from Azure Key Vault with in-process caching."""
+    global _fmp_secret_cache
+
+    if _fmp_secret_cache is not None:
+        logger.info("Using cached FMP API secret")
+        return _fmp_secret_cache
+
+    try:
+        credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
+        vault_url = f"https://{AZURE_KEYVAULT_NAME}.vault.azure.net"
+        client = SecretClient(vault_url=vault_url, credential=credential)
+        secret = client.get_secret(FMP_API_SECRET_NAME)
+        _fmp_secret_cache = secret
+        logger.info("Retrieved FMP API secret from Azure Key Vault")
+        return secret
+    except Exception as exc:
+        logger.error("Failed to retrieve FMP API secret: %s", exc)
+        return None
+
+
+def get_fmp_api_key() -> Optional[str]:
+    """Return the FMP API key value from Azure Key Vault if available."""
+    secret = get_fmp_api_secret()
+    if secret is None:
+        return None
+    return secret.value
+
+
+def _fetch_fmp_prices(
+    ticker: str,
+    start_date: date,
+    end_date: date,
+    api_key: str,
+) -> pd.Series:
+    """Fetch adjusted close prices for a single ticker from FMP."""
+    response = httpx.get(
+        f"{FMP_BASE_URL}/historical-price-full/{ticker}",
+        params={
+            "from": start_date.isoformat(),
+            "to": end_date.isoformat(),
+            "apikey": api_key,
+        },
+        timeout=30.0,
+    )
+    response.raise_for_status()
+
+    payload = response.json()
+    history = payload.get("historical", [])
+    if not history:
+        raise ValueError(f"FMP returned no historical data for {ticker}")
+
+    history_df = pd.DataFrame(history)
+    if "date" not in history_df.columns:
+        raise ValueError(f"FMP payload missing date field for {ticker}")
+
+    price_column = "adjClose" if "adjClose" in history_df.columns else "close"
+    if price_column not in history_df.columns:
+        raise ValueError(f"FMP payload missing price field for {ticker}")
+
+    series = history_df[["date", price_column]].copy()
+    series["date"] = pd.to_datetime(series["date"])
+    series = series.sort_values("date").set_index("date")[price_column]
+    series.name = ticker
+    return series.astype(float)
+
+
+def _fetch_fmp_market_data(
+    tickers: List[str],
+    period_months: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
+    """Fetch aligned historical prices from FMP and derive annualized returns and covariance."""
+    api_key = get_fmp_api_key()
+    if not api_key:
+        raise MissingFMPAPIKeyError(
+            "FMP API key is unavailable. Azure Key Vault secret retrieval must succeed before market data can be fetched."
+        )
+
+    end_date = pd.Timestamp.today().date()
+    start_date = (pd.Timestamp.today() - pd.DateOffset(months=period_months)).date()
+
+    price_series = []
+    for ticker in tickers:
+        price_series.append(_fetch_fmp_prices(ticker, start_date=start_date, end_date=end_date, api_key=api_key))
+
+    prices_df = pd.concat(price_series, axis=1)
+    prices_df = prices_df.dropna(axis=1, thresh=max(2, int(0.8 * len(prices_df))))
+    prices_df = prices_df.sort_index().ffill().dropna()
+
+    if prices_df.empty or len(prices_df.columns) < 2:
+        raise ValueError("Insufficient FMP price data after cleaning")
+
+    estimated = estimate_market_inputs(prices_df, api_key=api_key)
+
+    logger.info("Successfully fetched FMP data for %s over %s days", list(prices_df.columns), len(prices_df))
+    return prices_df, estimated.returns_df, estimated.mu, estimated.sigma_matrix
 
 
 def _generate_synthetic_data(tickers: List[str], n_days: int = 756) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
@@ -88,14 +204,12 @@ def _generate_synthetic_data(tickers: List[str], n_days: int = 756) -> Tuple[pd.
     for t in range(n_days):
         prices[t + 1] = prices[t] * np.exp(daily_log_returns[t])
 
-    dates = pd.bdate_range(end=pd.Timestamp.today(), periods=n_days + 1)
+    start_date = pd.Timestamp.today().normalize() - pd.offsets.BDay(n_days)
+    dates = pd.bdate_range(start=start_date, periods=n_days + 1)
     prices_df = pd.DataFrame(prices, index=dates, columns=tickers)
-    returns_df = prices_df.pct_change().dropna()
+    estimated = estimate_market_inputs(prices_df)
 
-    mu = returns_df.mean().values * 252
-    sigma_matrix = returns_df.cov().values * 252
-
-    return prices_df, returns_df, mu, sigma_matrix
+    return prices_df, estimated.returns_df, estimated.mu, estimated.sigma_matrix
 
 
 def get_market_data(
@@ -103,7 +217,9 @@ def get_market_data(
     period_months: int = 36
 ) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     """
-    Fetch market data from yfinance, falling back to synthetic data on failure.
+    Fetch market data from FMP using an Azure Key Vault-backed API key,
+    raising loudly if the API key is unavailable and falling back to synthetic data
+    only for non-authentication fetch failures.
     Returns (prices_df, returns_df, mu, sigma_matrix) where mu and sigma_matrix are annualized.
     """
     if tickers is None:
@@ -112,43 +228,10 @@ def get_market_data(
     tickers = [t.upper().strip() for t in tickers]
 
     try:
-        import yfinance as yf
-        period_str = f"{period_months}mo"
-        data = yf.download(tickers, period=period_str, auto_adjust=True, progress=False)
-
-        if data.empty:
-            raise ValueError("yfinance returned empty data")
-
-        # Handle single vs multi-ticker
-        if len(tickers) == 1:
-            prices_df = data[["Close"]].copy()
-            prices_df.columns = tickers
-        else:
-            if "Close" in data.columns.get_level_values(0):
-                prices_df = data["Close"].copy()
-            else:
-                prices_df = data.copy()
-
-        # Drop tickers with insufficient data
-        prices_df = prices_df.dropna(axis=1, thresh=int(0.8 * len(prices_df)))
-        prices_df = prices_df.ffill().dropna()
-
-        if prices_df.empty or len(prices_df.columns) < 2:
-            raise ValueError("Insufficient price data after cleaning")
-
-        returns_df = prices_df.pct_change().dropna()
-        mu = returns_df.mean().values * 252
-        sigma_matrix = returns_df.cov().values * 252
-
-        # Ensure positive definiteness
-        eigvals = np.linalg.eigvalsh(sigma_matrix)
-        if eigvals.min() < 1e-8:
-            sigma_matrix += (abs(eigvals.min()) + 1e-6) * np.eye(len(sigma_matrix))
-
-        logger.info(f"Successfully fetched data for {list(prices_df.columns)} over {len(prices_df)} days")
-        return prices_df, returns_df, mu, sigma_matrix
-
+        return _fetch_fmp_market_data(tickers=tickers, period_months=period_months)
+    except MissingFMPAPIKeyError:
+        raise
     except Exception as e:
-        logger.warning(f"yfinance failed ({e}), using synthetic data for tickers: {tickers}")
+        logger.warning(f"FMP fetch failed ({e}), using synthetic data for tickers: {tickers}")
         n_days = max(252 * 2, period_months * 21)
         return _generate_synthetic_data(tickers, n_days=n_days)
