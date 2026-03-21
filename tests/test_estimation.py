@@ -117,15 +117,53 @@ def test_estimate_market_inputs_supports_explicit_estimators(monkeypatch):
         covariance_estimator="ewma",
         estimator_decay=0.90,
     )
+    geometric = estimation.estimate_market_inputs(
+        prices_df,
+        return_estimator="geometric_mean",
+        covariance_estimator="constant_correlation_shrinkage",
+        covariance_shrinkage=0.35,
+    )
+    median = estimation.estimate_market_inputs(
+        prices_df,
+        return_estimator="median_mean",
+        covariance_estimator="semicovariance",
+    )
 
-    assert sample.mu.shape == shrunk.mu.shape == ewma.mu.shape == (3,)
-    assert sample.sigma_matrix.shape == shrunk.sigma_matrix.shape == ewma.sigma_matrix.shape == (3, 3)
+    assert sample.mu.shape == shrunk.mu.shape == ewma.mu.shape == geometric.mu.shape == median.mu.shape == (3,)
+    assert sample.sigma_matrix.shape == shrunk.sigma_matrix.shape == ewma.sigma_matrix.shape == geometric.sigma_matrix.shape == median.sigma_matrix.shape == (3, 3)
     assert not np.allclose(sample.mu, shrunk.mu)
     assert not np.allclose(sample.mu, ewma.mu)
+    assert not np.allclose(sample.mu, geometric.mu)
+    assert not np.allclose(sample.mu, median.mu)
     assert np.all(np.isfinite(shrunk.mu))
     assert np.all(np.isfinite(ewma.mu))
+    assert np.all(np.isfinite(geometric.mu))
+    assert np.all(np.isfinite(median.mu))
     assert np.all(np.linalg.eigvalsh(shrunk.sigma_matrix) > 0)
     assert np.all(np.linalg.eigvalsh(ewma.sigma_matrix) > 0)
+    assert np.all(np.linalg.eigvalsh(geometric.sigma_matrix) > 0)
+    assert np.all(np.linalg.eigvalsh(median.sigma_matrix) > 0)
+
+
+def test_constant_correlation_shrinkage_preserves_sample_variances():
+    prices_df = pd.DataFrame(
+        {
+            "AAPL": [100.0, 101.0, 104.0, 103.0, 106.0, 108.0],
+            "MSFT": [200.0, 202.0, 204.0, 205.0, 207.0, 209.0],
+            "GOOGL": [300.0, 304.0, 306.0, 309.0, 312.0, 313.0],
+        },
+        index=pd.date_range("2024-01-01", periods=6, freq="B"),
+    )
+
+    sample = estimation.estimate_market_inputs(prices_df, covariance_estimator="sample")
+    constant_corr = estimation.estimate_market_inputs(
+        prices_df,
+        covariance_estimator="constant_correlation_shrinkage",
+        covariance_shrinkage=0.6,
+    )
+
+    assert np.allclose(np.diag(sample.sigma_matrix), np.diag(constant_corr.sigma_matrix))
+    assert np.all(np.linalg.eigvalsh(constant_corr.sigma_matrix) > 0)
 
 
 def test_estimate_market_inputs_requires_minimum_history():

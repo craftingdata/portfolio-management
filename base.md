@@ -140,8 +140,7 @@ uv run pytest tests -q
 
 The repo now has first-pass implementations for the major advanced notebook families, but it is still short of broader parity in a few important areas:
 
-- broader provider expansion beyond the current FMP wrapper
-- estimator families beyond the current sample, shrinkage, and EWMA options
+- broader provider expansion is intentionally delayed until the project needs more real data sources than FMP
 
 ## Coverage Verification
 
@@ -419,8 +418,8 @@ These are not ready as pure solver tasks because the contract and modeling input
 
 The remaining parity gaps are not all the same kind of work.
 
-- ready now: provider cleanup, estimator hardening, richer validation, README/base.md reconciliation, and calibration work around already-implemented advanced models
-- still partially gated by richer inputs or semantics: broader factor pipelines, broader provider coverage, additional estimator families, deeper transaction-cost calibration, and higher-fidelity market-impact modeling
+- ready now: richer validation, README/base.md reconciliation, and calibration work around already-implemented advanced models
+- still partially gated by richer inputs or semantics: broader factor pipelines, deeper transaction-cost calibration, and higher-fidelity market-impact modeling
 
 ## Which Gates Can Be Removed By FMP Or FinanceToolkit
 
@@ -1387,11 +1386,11 @@ Implement in this order unless the user changes priorities:
 Status update:
 
 - completed in a first-pass form through a lightweight FMP provider wrapper, shared price-alignment logic, and deterministic tests for metadata, liquidity, differing dates, and sparse ticker series
-- remaining work in this area is broader provider expansion, not the initial abstraction
+- broader provider expansion is intentionally delayed until the project needs more real data sources than FMP
 
-### Why This Comes First
+### Why This Is Delayed
 
-The repo already talks to FMP through a lightweight provider wrapper. Future sector constraints, benchmark-aware estimation, and metadata-driven rules still need broader provider expansion, but the initial boundary is now in place.
+The repo already talks to FMP through a lightweight provider wrapper. Additional provider work is not the best next investment until the project actually needs a second real data source, so this area is deferred rather than treated as an active parity blocker.
 
 ### Primary Files To Edit
 
@@ -1400,7 +1399,7 @@ The repo already talks to FMP through a lightweight provider wrapper. Future sec
 - `tests/test_data_service.py`
 - `README.md`
 
-### Desired End State
+### Deferred End State
 
 Refactor the current direct FMP flow into a cleaner provider-oriented structure while preserving behavior.
 
@@ -1421,7 +1420,7 @@ One acceptable approach is:
 - add metadata fetch support for fields such as sector, industry, asset name, and asset type when FMP exposes them
 - return a richer internal object or tuple that can later support constraints and ranking without another fetch layer rewrite
 
-### Acceptance Criteria
+### Deferred Acceptance Criteria
 
 - Existing `get_market_data()` behavior still works.
 - Missing-key loud failure still works.
@@ -1429,7 +1428,7 @@ One acceptable approach is:
 - Metadata can be fetched or at least a clear scaffold exists for it.
 - Tests remain deterministic.
 
-### Tests To Add Or Update
+### Tests To Add Or Update When This Resumes
 
 - add mocked tests for metadata retrieval
 - add tests for cleaning and alignment when dates differ across tickers
@@ -1438,9 +1437,9 @@ One acceptable approach is:
 
 ## Priority 2: Estimation Pipeline Hardening
 
-### Why This Comes Second
+### Status Update
 
-The current estimator computes sample mean and sample covariance only. That is adequate for a first pass, but too narrow for robust portfolio construction.
+The estimator layer now supports sample mean, shrunk mean, EWMA mean, geometric mean, median mean, sample covariance, diagonal shrinkage, EWMA covariance, constant-correlation shrinkage, and semicovariance while preserving the sample path as the default.
 
 ### Primary Files To Edit
 
@@ -1469,10 +1468,16 @@ Target estimation options:
 
 - return estimation:
   - sample mean
-  - optional shrinkage or more robust estimator later
+  - shrinkage
+  - EWMA
+  - geometric mean
+  - median mean
 - covariance estimation:
   - sample covariance
-  - optional shrinkage or regularized covariance later
+  - diagonal shrinkage
+  - EWMA
+  - constant-correlation shrinkage
+  - semicovariance
 - optional benchmark statistics if needed later for relative metrics
 
 ### Acceptance Criteria

@@ -201,7 +201,7 @@ Metadata and factor normalization behavior:
 - inferred factor models now combine a market factor with additional statistical residual factors derived from aligned return history
 - sector-constrained runs normalize common sector aliases, infer sectors from industry when possible, and exclude ETFs from sector caps
 - assets with missing or unstable sector labels are dropped from the sector-constrained subproblem instead of aborting the full request
-- the estimator layer now supports EWMA return and covariance estimators using only aligned price history already present in the repo
+- the estimator layer now supports sample, shrinkage, EWMA, geometric-mean, median-mean, constant-correlation-shrinkage, and semicovariance estimators using aligned price history already present in the repo
 - market-impact modeling now supports either a linear ADV-scaled penalty or a steeper piecewise-linear schedule above a configurable ADV participation threshold
 - round-lot defaults are now repo-managed through `app/config/lot_metadata.yml`, with request overrides taking precedence and asset-type-aware fallbacks for omitted inputs
 
@@ -231,8 +231,7 @@ The repository has first-pass implementations for the major advanced portfolio f
 
 Main remaining gaps:
 
-- broader provider expansion beyond the current FMP-backed wrapper
-- estimator families beyond the current sample, shrinkage, and EWMA options
+- broader provider expansion is intentionally delayed until the project needs more real data sources than FMP
 
 In other words: the major categories now exist, but some of them are still simplified first-pass implementations rather than complete notebook-family parity.
 

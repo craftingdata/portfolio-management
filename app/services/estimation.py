@@ -55,7 +55,27 @@ def _estimate_expected_returns(
     if method == "ewma_mean":
         weights = _exponential_weights(len(returns_df), estimator_decay)
         return np.average(returns_df.to_numpy(dtype=float), axis=0, weights=weights) * 252
+    if method == "geometric_mean":
+        gross_returns = np.clip(1.0 + returns_df.to_numpy(dtype=float), 1e-8, None)
+        return np.exp(np.mean(np.log(gross_returns), axis=0) * 252.0) - 1.0
+    if method == "median_mean":
+        return returns_df.median().to_numpy(dtype=float) * 252
     raise ValueError(f"Unsupported return estimator: {method}")
+
+
+def _constant_correlation_target(sample_covariance: np.ndarray) -> np.ndarray:
+    standard_deviations = np.sqrt(np.maximum(np.diag(sample_covariance), 1e-12))
+    correlation_matrix = sample_covariance / np.outer(standard_deviations, standard_deviations)
+    correlation_matrix = np.nan_to_num(correlation_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+    if len(correlation_matrix) <= 1:
+        average_correlation = 0.0
+    else:
+        upper_indices = np.triu_indices_from(correlation_matrix, k=1)
+        average_correlation = float(np.mean(correlation_matrix[upper_indices])) if len(upper_indices[0]) else 0.0
+
+    target = np.outer(standard_deviations, standard_deviations) * average_correlation
+    np.fill_diagonal(target, np.diag(sample_covariance))
+    return target
 
 
 def _estimate_covariance_matrix(
@@ -78,6 +98,12 @@ def _estimate_covariance_matrix(
         normalization = float(max(1e-8, 1.0 - np.sum(weights**2)))
         weighted_covariance = (centered * weights[:, None]).T @ centered / normalization
         return weighted_covariance * 252
+    if method == "constant_correlation_shrinkage":
+        target = _constant_correlation_target(sample_covariance)
+        return (1.0 - covariance_shrinkage) * sample_covariance + covariance_shrinkage * target
+    if method == "semicovariance":
+        downside_returns = np.minimum(returns_df.to_numpy(dtype=float), 0.0)
+        return np.cov(downside_returns, rowvar=False, ddof=1) * 252
     raise ValueError(f"Unsupported covariance estimator: {method}")
 
 

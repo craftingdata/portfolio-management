@@ -8,8 +8,8 @@ class OptimizeRequest(BaseModel):
     investment_horizon: Union[int, str] = Field(..., description='Months as int or "short"/"medium"/"long"')
     tickers: Optional[List[str]] = Field(None, description="Custom tickers list; defaults to diversified set")
     risk_free_rate: Optional[float] = Field(0.04, description="Annual risk-free rate (default 4%)")
-    return_estimator: Optional[str] = Field("sample", description="Return estimator: sample, shrunk_mean, or ewma_mean")
-    covariance_estimator: Optional[str] = Field("sample", description="Covariance estimator: sample, diagonal_shrinkage, or ewma")
+    return_estimator: Optional[str] = Field("sample", description="Return estimator: sample, shrunk_mean, ewma_mean, geometric_mean, or median_mean")
+    covariance_estimator: Optional[str] = Field("sample", description="Covariance estimator: sample, diagonal_shrinkage, ewma, constant_correlation_shrinkage, or semicovariance")
     mean_shrinkage: Optional[float] = Field(0.0, ge=0.0, le=1.0, description="Shrinkage intensity for shrunk_mean return estimation")
     covariance_shrinkage: Optional[float] = Field(0.0, ge=0.0, le=1.0, description="Shrinkage intensity for diagonal covariance shrinkage")
     estimator_decay: Optional[float] = Field(0.94, gt=0.0, lt=1.0, description="Decay factor used by EWMA estimators")
@@ -71,7 +71,7 @@ class OptimizeRequest(BaseModel):
         if v is None:
             return "sample"
         value = str(v).strip().lower()
-        allowed = {"sample", "shrunk_mean", "ewma_mean"}
+        allowed = {"sample", "shrunk_mean", "ewma_mean", "geometric_mean", "median_mean"}
         if value not in allowed:
             raise ValueError(f"return_estimator must be one of {sorted(allowed)}")
         return value
@@ -82,7 +82,7 @@ class OptimizeRequest(BaseModel):
         if v is None:
             return "sample"
         value = str(v).strip().lower()
-        allowed = {"sample", "diagonal_shrinkage", "ewma"}
+        allowed = {"sample", "diagonal_shrinkage", "ewma", "constant_correlation_shrinkage", "semicovariance"}
         if value not in allowed:
             raise ValueError(f"covariance_estimator must be one of {sorted(allowed)}")
         return value

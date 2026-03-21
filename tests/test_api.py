@@ -143,17 +143,16 @@ def test_optimize_passes_estimator_configuration(client):
             "total_amount": 50000,
             "risk_tolerance": "medium",
             "investment_horizon": "medium",
-            "return_estimator": "shrunk_mean",
-            "covariance_estimator": "diagonal_shrinkage",
-            "mean_shrinkage": 0.35,
+            "return_estimator": "geometric_mean",
+            "covariance_estimator": "constant_correlation_shrinkage",
             "covariance_shrinkage": 0.25,
             "estimator_decay": 0.9,
         })
 
     assert response.status_code == 200, response.text
-    assert captured["return_estimator"] == "shrunk_mean"
-    assert captured["covariance_estimator"] == "diagonal_shrinkage"
-    assert captured["mean_shrinkage"] == 0.35
+    assert captured["return_estimator"] == "geometric_mean"
+    assert captured["covariance_estimator"] == "constant_correlation_shrinkage"
+    assert captured["mean_shrinkage"] == 0.0
     assert captured["covariance_shrinkage"] == 0.25
     assert captured["estimator_decay"] == 0.9
 
