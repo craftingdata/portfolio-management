@@ -3,10 +3,12 @@ import pytest
 from app.services.optimization import (
     minimum_variance,
     maximum_return,
+    utility_maximization,
     max_sharpe_ratio,
     mean_variance,
     equal_weight,
     risk_parity,
+    generate_efficient_frontier,
     run_all_models,
     compute_metrics,
 )
@@ -59,6 +61,13 @@ def test_maximum_return(synthetic_data):
     assert_valid_portfolio(result, len(mu))
 
 
+def test_utility_maximization(synthetic_data):
+    tickers, mu, sigma = synthetic_data
+    result = utility_maximization(mu, sigma, risk_aversion=1.5)
+    assert result["model_name"] == "UtilityMaximization"
+    assert_valid_portfolio(result, len(mu))
+
+
 def test_max_sharpe_ratio(synthetic_data):
     tickers, mu, sigma = synthetic_data
     result = max_sharpe_ratio(mu, sigma)
@@ -102,12 +111,29 @@ def test_compute_metrics(synthetic_data):
     assert risk > 0
 
 
+def test_generate_efficient_frontier(synthetic_data):
+    tickers, mu, sigma = synthetic_data
+    frontier = generate_efficient_frontier(mu, sigma, n_points=5)
+
+    assert len(frontier) == 5
+    risks = [point["expected_risk"] for point in frontier]
+    returns = [point["expected_return"] for point in frontier]
+
+    assert risks == sorted(risks)
+    assert returns == sorted(returns)
+    for point in frontier:
+        assert np.isfinite(point["expected_return"])
+        assert np.isfinite(point["expected_risk"])
+        assert np.isfinite(point["sharpe_ratio"])
+        assert abs(point["weights"].sum() - 1.0) < 1e-4
+
+
 @pytest.mark.parametrize("risk_tol", [1.0, 5.0, 9.0])
 def test_run_all_models(synthetic_data, risk_tol):
     tickers, mu, sigma = synthetic_data
     results = run_all_models(mu, sigma, tickers=tickers, risk_tolerance_normalized=risk_tol)
 
-    expected_models = {"MinimumVariance", "MaximumReturn", "MaxSharpeRatio", "MeanVariance", "EqualWeight", "RiskParity"}
+    expected_models = {"MinimumVariance", "MaximumReturn", "UtilityMaximization", "MaxSharpeRatio", "MeanVariance", "EqualWeight", "RiskParity"}
     assert set(results.keys()) == expected_models, f"Missing models: {expected_models - set(results.keys())}"
 
     n = len(mu)

@@ -47,10 +47,18 @@ class PortfolioResult(BaseModel):
     reasoning: str
 
 
+class FrontierPoint(BaseModel):
+    target_return: float
+    expected_return: float
+    expected_risk: float
+    sharpe_ratio: float
+
+
 class OptimizeResponse(BaseModel):
     total_amount: float
     risk_tolerance_normalized: float
     investment_horizon_months: int
     portfolios: List[PortfolioResult]
+    efficient_frontier: List[FrontierPoint]
     data_period_used: str
     optimization_status: str

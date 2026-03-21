@@ -14,6 +14,14 @@ def compute_metrics(weights: np.ndarray, mu: np.ndarray, sigma: np.ndarray, risk
     return expected_return, expected_risk, sharpe_ratio
 
 
+def _normalize_weights(weights: np.ndarray) -> np.ndarray:
+    weights = np.maximum(np.array(weights, dtype=float), 0.0)
+    total = float(weights.sum())
+    if total > 1e-8:
+        return weights / total
+    return np.ones(len(weights)) / len(weights)
+
+
 def _scipy_min_variance(mu: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     from scipy.optimize import minimize
     n = len(mu)
@@ -28,7 +36,38 @@ def _scipy_min_variance(mu: np.ndarray, sigma: np.ndarray) -> np.ndarray:
         constraints=constraints,
         options={"ftol": 1e-9, "maxiter": 1000},
     )
-    return np.maximum(result.x, 0)
+    return _normalize_weights(result.x)
+
+
+def _scipy_utility_maximization(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    risk_aversion: float,
+    risk_free_rate: float,
+) -> np.ndarray:
+    from scipy.optimize import minimize
+
+    n = len(mu)
+    x0 = np.ones(n) / n
+
+    def neg_utility(x):
+        x = np.array(x)
+        expected_return = float(mu @ x)
+        variance = float(x @ sigma @ x)
+        utility = expected_return - 0.5 * risk_aversion * variance
+        return -utility
+
+    constraints = [{"type": "eq", "fun": lambda x: np.sum(x) - 1.0}]
+    bounds = [(0.0, 1.0)] * n
+    result = minimize(
+        neg_utility,
+        x0,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+        options={"ftol": 1e-9, "maxiter": 1000},
+    )
+    return _normalize_weights(result.x)
 
 
 def minimum_variance(mu: np.ndarray, sigma: np.ndarray, risk_free_rate: float = 0.04) -> dict:
@@ -46,9 +85,7 @@ def minimum_variance(mu: np.ndarray, sigma: np.ndarray, risk_free_rate: float = 
         model.addCons(quicksum(x[i] for i in range(n)) == 1.0)
         model.optimize()
         if model.getStatus() == "optimal":
-            weights = np.array([model.getVal(x[i]) for i in range(n)])
-            weights = np.maximum(weights, 0)
-            weights = weights / weights.sum()
+            weights = _normalize_weights([model.getVal(x[i]) for i in range(n)])
         else:
             raise ValueError(f"SCIP status: {model.getStatus()}")
     except Exception as e:
@@ -86,13 +123,7 @@ def maximum_return(mu: np.ndarray, sigma: np.ndarray, risk_level: float = 0.5, r
         model.addCons(quad_risk <= max_risk_sq)
         model.optimize()
         if model.getStatus() == "optimal":
-            weights = np.array([model.getVal(x[i]) for i in range(n)])
-            weights = np.maximum(weights, 0)
-            s = weights.sum()
-            if s > 1e-8:
-                weights = weights / s
-            else:
-                raise ValueError("Zero weights from SCIP")
+            weights = _normalize_weights([model.getVal(x[i]) for i in range(n)])
         else:
             raise ValueError(f"SCIP status: {model.getStatus()}")
     except Exception as e:
@@ -112,16 +143,51 @@ def maximum_return(mu: np.ndarray, sigma: np.ndarray, risk_level: float = 0.5, r
             constraints=constraints,
             options={"ftol": 1e-9, "maxiter": 1000},
         )
-        weights = np.maximum(result.x, 0)
-        s = weights.sum()
-        if s > 1e-8:
-            weights = weights / s
-        else:
-            weights = np.ones(n) / n
+        weights = _normalize_weights(result.x)
 
     expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
     return {
         "model_name": "MaximumReturn",
+        "weights": weights,
+        "expected_return": expected_return,
+        "expected_risk": expected_risk,
+        "sharpe_ratio": sharpe_ratio,
+    }
+
+
+def utility_maximization(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    risk_aversion: float = 1.0,
+    risk_free_rate: float = 0.04,
+) -> dict:
+    n = len(mu)
+    risk_aversion = float(max(risk_aversion, 1e-6))
+    weights = None
+
+    try:
+        from pyscipopt import Model, quicksum
+
+        model = Model()
+        model.hideOutput()
+        x = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"x_{i}") for i in range(n)]
+        utility = quicksum(mu[i] * x[i] for i in range(n)) - 0.5 * risk_aversion * quicksum(
+            sigma[i, j] * x[i] * x[j] for i in range(n) for j in range(n)
+        )
+        model.setObjective(utility, "maximize")
+        model.addCons(quicksum(x[i] for i in range(n)) == 1.0)
+        model.optimize()
+        if model.getStatus() == "optimal":
+            weights = _normalize_weights([model.getVal(x[i]) for i in range(n)])
+        else:
+            raise ValueError(f"SCIP status: {model.getStatus()}")
+    except Exception as e:
+        logger.warning(f"UtilityMaximization SCIP failed ({e}), falling back to scipy")
+        weights = _scipy_utility_maximization(mu, sigma, risk_aversion, risk_free_rate)
+
+    expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
+    return {
+        "model_name": "UtilityMaximization",
         "weights": weights,
         "expected_return": expected_return,
         "expected_risk": expected_risk,
@@ -229,13 +295,7 @@ def mean_variance(mu: np.ndarray, sigma: np.ndarray, risk_level: float = 0.5, ri
         model.addCons(quicksum(mu[i] * x[i] for i in range(n)) >= target_return)
         model.optimize()
         if model.getStatus() == "optimal":
-            weights = np.array([model.getVal(x[i]) for i in range(n)])
-            weights = np.maximum(weights, 0)
-            s = weights.sum()
-            if s > 1e-8:
-                weights = weights / s
-            else:
-                raise ValueError("Zero weights")
+            weights = _normalize_weights([model.getVal(x[i]) for i in range(n)])
         else:
             raise ValueError(f"SCIP status: {model.getStatus()}")
     except Exception as e:
@@ -255,12 +315,7 @@ def mean_variance(mu: np.ndarray, sigma: np.ndarray, risk_level: float = 0.5, ri
             constraints=constraints,
             options={"ftol": 1e-9, "maxiter": 1000},
         )
-        weights = np.maximum(result.x, 0)
-        s = weights.sum()
-        if s > 1e-8:
-            weights = weights / s
-        else:
-            weights = np.ones(n) / n
+        weights = _normalize_weights(result.x)
 
     expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
     return {
@@ -311,12 +366,7 @@ def risk_parity(mu: np.ndarray, sigma: np.ndarray, risk_free_rate: float = 0.04)
         constraints=constraints,
         options={"ftol": 1e-12, "maxiter": 2000},
     )
-    weights = np.maximum(result.x, 0)
-    s = weights.sum()
-    if s > 1e-8:
-        weights = weights / s
-    else:
-        weights = np.ones(n) / n
+    weights = _normalize_weights(result.x)
 
     expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
     return {
@@ -328,6 +378,47 @@ def risk_parity(mu: np.ndarray, sigma: np.ndarray, risk_free_rate: float = 0.04)
     }
 
 
+def _risk_aversion_from_risk_level(risk_level: float) -> float:
+    return float(np.clip(2.5 - 2.0 * float(risk_level), 0.25, 3.0))
+
+
+def generate_efficient_frontier(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    n_points: int = 7,
+    risk_free_rate: float = 0.04,
+) -> List[dict]:
+    if n_points < 2:
+        raise ValueError("n_points must be at least 2")
+
+    min_return = float(np.min(mu))
+    max_return = float(np.max(mu))
+    if abs(max_return - min_return) < 1e-12:
+        target_returns = np.full(n_points, min_return)
+    else:
+        target_returns = np.linspace(min_return, max_return, n_points)
+
+    frontier = []
+    for target_return in target_returns:
+        if abs(max_return - min_return) < 1e-12:
+            risk_level = 0.5
+        else:
+            risk_level = float((target_return - min_return) / (max_return - min_return))
+        result = mean_variance(mu, sigma, risk_level=risk_level, risk_free_rate=risk_free_rate)
+        frontier.append(
+            {
+                "target_return": float(target_return),
+                "weights": result["weights"],
+                "expected_return": float(result["expected_return"]),
+                "expected_risk": float(result["expected_risk"]),
+                "sharpe_ratio": float(result["sharpe_ratio"]),
+            }
+        )
+
+    frontier.sort(key=lambda point: point["expected_risk"])
+    return frontier
+
+
 def run_all_models(
     mu: np.ndarray,
     sigma: np.ndarray,
@@ -336,7 +427,7 @@ def run_all_models(
     risk_free_rate: float = 0.04,
 ) -> dict:
     """
-    Run all 6 portfolio optimization models.
+    Run all core portfolio optimization models.
     Returns dict mapping model_name -> result dict with keys:
       weights (np.ndarray), expected_return, expected_risk, sharpe_ratio
     """
@@ -347,20 +438,32 @@ def run_all_models(
     _canonical_names = {
         minimum_variance: "MinimumVariance",
         maximum_return: "MaximumReturn",
+        utility_maximization: "UtilityMaximization",
         max_sharpe_ratio: "MaxSharpeRatio",
         mean_variance: "MeanVariance",
         equal_weight: "EqualWeight",
         risk_parity: "RiskParity",
     }
 
-    for model_fn, kwargs in [
+    model_specs = [
         (minimum_variance, {"mu": mu, "sigma": sigma, "risk_free_rate": risk_free_rate}),
         (maximum_return, {"mu": mu, "sigma": sigma, "risk_level": risk_level, "risk_free_rate": risk_free_rate}),
+        (
+            utility_maximization,
+            {
+                "mu": mu,
+                "sigma": sigma,
+                "risk_aversion": _risk_aversion_from_risk_level(risk_level),
+                "risk_free_rate": risk_free_rate,
+            },
+        ),
         (max_sharpe_ratio, {"mu": mu, "sigma": sigma, "risk_free_rate": risk_free_rate}),
         (mean_variance, {"mu": mu, "sigma": sigma, "risk_level": risk_level, "risk_free_rate": risk_free_rate}),
         (equal_weight, {"mu": mu, "sigma": sigma, "risk_free_rate": risk_free_rate}),
         (risk_parity, {"mu": mu, "sigma": sigma, "risk_free_rate": risk_free_rate}),
-    ]:
+    ]
+
+    for model_fn, kwargs in model_specs:
         try:
             result = model_fn(**kwargs)
             results[result["model_name"]] = result

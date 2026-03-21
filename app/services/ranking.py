@@ -1,9 +1,12 @@
-from typing import List
+from typing import List, Optional
+
+import numpy as np
 from app.models.schemas import PortfolioResult
 
 MODEL_DESCRIPTIONS_DEFAULT = {
     "MinimumVariance": "Minimizes portfolio variance (risk) subject to full investment constraint. Best for conservative investors.",
     "MaximumReturn": "Maximizes expected return subject to a risk budget. Best for aggressive investors.",
+    "UtilityMaximization": "Maximizes expected utility using an explicit risk-aversion parameter. Best for balanced investors who want a single objective.",
     "MaxSharpeRatio": "Maximizes risk-adjusted return (Sharpe ratio). Best for balanced risk/return.",
     "MeanVariance": "Classic Markowitz mean-variance optimization with target return. Best for moderate investors.",
     "EqualWeight": "Simple equal allocation to all assets. Robust baseline with no optimization.",
@@ -11,17 +14,18 @@ MODEL_DESCRIPTIONS_DEFAULT = {
 }
 
 BASE_ORDER = {
-    "low": ["MinimumVariance", "EqualWeight", "RiskParity", "MeanVariance", "MaxSharpeRatio", "MaximumReturn"],
-    "medium": ["MaxSharpeRatio", "MeanVariance", "RiskParity", "MinimumVariance", "EqualWeight", "MaximumReturn"],
-    "high": ["MaximumReturn", "MaxSharpeRatio", "MeanVariance", "RiskParity", "EqualWeight", "MinimumVariance"],
+    "low": ["MinimumVariance", "EqualWeight", "RiskParity", "UtilityMaximization", "MeanVariance", "MaxSharpeRatio", "MaximumReturn"],
+    "medium": ["MaxSharpeRatio", "UtilityMaximization", "MeanVariance", "RiskParity", "MinimumVariance", "EqualWeight", "MaximumReturn"],
+    "high": ["MaximumReturn", "UtilityMaximization", "MaxSharpeRatio", "MeanVariance", "RiskParity", "EqualWeight", "MinimumVariance"],
 }
 
-BASE_SCORES = [100, 85, 70, 55, 40, 25]
+BASE_SCORES = [100, 85, 70, 60, 45, 30, 15]
 
 HORIZON_ADJUSTMENTS = {
     "MinimumVariance": {"short": +15, "long": -10},
     "EqualWeight": {"short": +10, "long": 0},
     "MaximumReturn": {"short": -15, "long": +15},
+    "UtilityMaximization": {"short": -5, "long": +5},
     "MaxSharpeRatio": {"short": -5, "long": +10},
     "MeanVariance": {"short": 0, "long": 0},
     "RiskParity": {"short": 0, "long": 0},
@@ -35,6 +39,10 @@ REASONING_TEMPLATES = {
     "MaximumReturn": (
         "Maximizes expected return within risk constraints - suitable for high risk tolerance ({rt}/10) "
         "and long horizons ({h} months)."
+    ),
+    "UtilityMaximization": (
+        "Maximizes expected utility with explicit risk aversion - adaptable for risk tolerance {rt}/10 "
+        "and {h}-month horizon."
     ),
     "MaxSharpeRatio": (
         "Optimizes risk-adjusted returns (Sharpe ratio) - versatile approach for medium risk tolerance "
@@ -61,6 +69,7 @@ def rank_portfolios(
     total_amount: float,
     risk_tolerance: float,
     investment_horizon_months: int,
+    efficient_frontier: Optional[List[dict]] = None,
     model_descriptions: dict = None,
 ) -> List[PortfolioResult]:
     if model_descriptions is None:
@@ -83,22 +92,90 @@ def rank_portfolios(
         horizon_cat = "medium"
 
     order = BASE_ORDER[risk_cat]
+    base_score_lookup = {model_name: BASE_SCORES[idx] for idx, model_name in enumerate(order)}
 
-    # Compute scores
+    model_metrics = []
+    for model_name in order:
+        if model_name not in portfolio_results:
+            continue
+        result = portfolio_results[model_name]
+        model_metrics.append(
+            {
+                "model_name": model_name,
+                "result": result,
+                "expected_return": float(result["expected_return"]),
+                "expected_risk": float(result["expected_risk"]),
+                "sharpe_ratio": float(result["sharpe_ratio"]),
+            }
+        )
+
+    if not model_metrics:
+        return []
+
+    returns = np.array([item["expected_return"] for item in model_metrics], dtype=float)
+    risks = np.array([item["expected_risk"] for item in model_metrics], dtype=float)
+    sharpes = np.array([item["sharpe_ratio"] for item in model_metrics], dtype=float)
+
+    if efficient_frontier:
+        frontier_sorted = sorted(efficient_frontier, key=lambda point: float(point["expected_risk"]))
+        frontier_risks = np.array([float(point["expected_risk"]) for point in frontier_sorted], dtype=float)
+        frontier_returns = np.array([float(point["expected_return"]) for point in frontier_sorted], dtype=float)
+    else:
+        frontier_risks = np.array([], dtype=float)
+        frontier_returns = np.array([], dtype=float)
+
+    risk_floor = float(risks.min())
+    risk_ceiling = float(risks.max())
+    risk_span = max(risk_ceiling - risk_floor, 1e-8)
+
+    horizon_shift = {"short": -0.12, "medium": 0.0, "long": 0.10}[horizon_cat]
+    target_risk_fraction = float(np.clip((risk_tolerance / 10.0) + horizon_shift, 0.0, 1.0))
+    target_risk = risk_floor + target_risk_fraction * risk_span
+
+    def _scale(value: float, lower: float, upper: float) -> float:
+        if abs(upper - lower) < 1e-12:
+            return 0.5
+        return float(np.clip((value - lower) / (upper - lower), 0.0, 1.0))
+
+    def _frontier_bonus(expected_risk: float, expected_return: float) -> float:
+        if frontier_risks.size == 0:
+            return 50.0
+        frontier_return = float(
+            np.interp(
+                expected_risk,
+                frontier_risks,
+                frontier_returns,
+                left=float(frontier_returns[0]),
+                right=float(frontier_returns[-1]),
+            )
+        )
+        gap = max(0.0, frontier_return - expected_return)
+        scale = max(abs(frontier_return), abs(expected_return), 1e-8)
+        return 100.0 * (1.0 - min(1.0, gap / scale))
+
     model_scores = {}
-    for idx, model_name in enumerate(order):
-        base_score = BASE_SCORES[idx]
+    for item in model_metrics:
+        model_name = item["model_name"]
+        base_score = base_score_lookup[model_name]
         adj = HORIZON_ADJUSTMENTS.get(model_name, {}).get(horizon_cat, 0)
-        score = min(100, max(0, base_score + adj))
-        model_scores[model_name] = score
+        heuristic_score = float(np.clip(base_score + adj, 0.0, 100.0))
 
-    # Sort by score descending
+        return_score = _scale(item["expected_return"], float(returns.min()), float(returns.max()))
+        sharpe_score = _scale(item["sharpe_ratio"], float(sharpes.min()), float(sharpes.max()))
+        risk_fit_score = 100.0 * (1.0 - min(1.0, abs(item["expected_risk"] - target_risk) / risk_span))
+        frontier_score = _frontier_bonus(item["expected_risk"], item["expected_return"])
+        output_score = 100.0 * (
+            0.35 * return_score
+            + 0.30 * sharpe_score
+            + 0.20 * (risk_fit_score / 100.0)
+            + 0.15 * (frontier_score / 100.0)
+        )
+        model_scores[model_name] = float(np.clip(0.55 * heuristic_score + 0.45 * output_score, 0.0, 100.0))
+
     sorted_models = sorted(model_scores.keys(), key=lambda m: model_scores[m], reverse=True)
 
     ranked = []
     for model_name in sorted_models:
-        if model_name not in portfolio_results:
-            continue
         result = portfolio_results[model_name]
         weights_arr = result["weights"]
 

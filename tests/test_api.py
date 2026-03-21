@@ -66,9 +66,9 @@ def test_list_models(client):
     assert response.status_code == 200
     data = response.json()
     assert "models" in data
-    assert len(data["models"]) == 6
+    assert len(data["models"]) == 7
     model_names = [m["name"] for m in data["models"]]
-    for expected in ["MinimumVariance", "MaximumReturn", "MaxSharpeRatio", "MeanVariance", "EqualWeight", "RiskParity"]:
+    for expected in ["MinimumVariance", "MaximumReturn", "UtilityMaximization", "MaxSharpeRatio", "MeanVariance", "EqualWeight", "RiskParity"]:
         assert expected in model_names
 
 
@@ -82,7 +82,8 @@ def test_optimize_medium_risk(client):
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["optimization_status"] == "success"
-    assert len(data["portfolios"]) == 6
+    assert len(data["portfolios"]) == 7
+    assert len(data["efficient_frontier"]) == 7
     # Check first portfolio structure
     p = data["portfolios"][0]
     for field in ["rank", "model_name", "weights", "expected_annual_return", "expected_annual_risk", "sharpe_ratio", "allocation", "applicability_score", "reasoning"]:
@@ -102,7 +103,7 @@ def test_optimize_numeric_inputs(client):
     assert data["total_amount"] == 50000
     assert data["risk_tolerance_normalized"] == 7.5
     assert data["investment_horizon_months"] == 18
-    assert len(data["portfolios"]) == 6
+    assert len(data["portfolios"]) == 7
 
 
 def test_optimize_low_risk(client):
@@ -116,10 +117,10 @@ def test_optimize_low_risk(client):
     data = response.json()
     assert data["risk_tolerance_normalized"] == 2.0
     assert data["investment_horizon_months"] == 6
-    assert len(data["portfolios"]) == 6
+    assert len(data["portfolios"]) == 7
     # For low risk, top portfolio should be conservative
     top_model = data["portfolios"][0]["model_name"]
-    assert top_model in ["MinimumVariance", "EqualWeight", "RiskParity"]
+    assert top_model in ["MinimumVariance", "EqualWeight", "RiskParity", "UtilityMaximization"]
 
 
 def test_optimize_high_risk(client):
@@ -133,7 +134,7 @@ def test_optimize_high_risk(client):
     data = response.json()
     assert data["risk_tolerance_normalized"] == 8.0
     assert data["investment_horizon_months"] == 60
-    assert len(data["portfolios"]) == 6
+    assert len(data["portfolios"]) == 7
 
 
 def test_validation_negative_amount(client):
@@ -203,4 +204,4 @@ def test_portfolio_ranks_unique(client):
     assert response.status_code == 200
     data = response.json()
     ranks = [p["rank"] for p in data["portfolios"]]
-    assert sorted(ranks) == list(range(1, 7))
+    assert sorted(ranks) == list(range(1, 8))
