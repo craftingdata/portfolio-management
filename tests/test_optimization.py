@@ -220,13 +220,53 @@ def test_run_all_models(synthetic_data, risk_tol):
 def test_factor_model_variants(price_frame_data):
     tickers, prices_df, returns_df, mu, sigma = price_frame_data
 
-    utility_result = factor_utility_maximization(mu, returns_df, risk_aversion=1.5)
-    constraint_result = factor_variance_constraint(mu, returns_df, risk_level=0.5)
+    utility_result = factor_utility_maximization(mu, tickers, returns_df=returns_df, risk_aversion=1.5)
+    constraint_result = factor_variance_constraint(mu, tickers, returns_df=returns_df, risk_level=0.5)
 
     assert utility_result["model_name"] == "FactorUtilityMaximization"
     assert constraint_result["model_name"] == "FactorVarianceConstraint"
     assert_valid_portfolio(utility_result, len(mu))
     assert_valid_portfolio(constraint_result, len(mu))
+
+
+def test_factor_model_variants_accept_explicit_factor_contract(price_frame_data):
+    tickers, prices_df, returns_df, mu, sigma = price_frame_data
+    factor_exposures = {
+        ticker: {"market": 1.0 + (index * 0.05), "quality": 0.2 - (index * 0.03)}
+        for index, ticker in enumerate(tickers)
+    }
+    factor_covariance = {
+        "market": {"market": 0.045, "quality": 0.012},
+        "quality": {"market": 0.012, "quality": 0.030},
+    }
+    specific_risk = {ticker: 0.020 + (index * 0.002) for index, ticker in enumerate(tickers)}
+
+    result = factor_utility_maximization(
+        mu,
+        tickers,
+        factor_exposures=factor_exposures,
+        factor_covariance=factor_covariance,
+        specific_risk=specific_risk,
+        risk_aversion=1.2,
+    )
+
+    assert result["factor_names"] == ["market", "quality"]
+    assert result["factor_exposures"].shape == (len(tickers), 2)
+    assert result["factor_covariance"].shape == (2, 2)
+    assert result["specific_risk"].shape == (len(tickers), len(tickers))
+    assert_valid_portfolio(result, len(mu))
+
+
+def test_factor_model_variants_reject_incomplete_factor_contract(price_frame_data):
+    tickers, prices_df, returns_df, mu, sigma = price_frame_data
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        factor_variance_constraint(
+            mu,
+            tickers,
+            factor_exposures={ticker: {"market": 1.0} for ticker in tickers},
+            risk_level=0.5,
+        )
 
 
 def test_sector_allocation_transaction_cost_and_integer_models(price_frame_data):
@@ -240,6 +280,7 @@ def test_sector_allocation_transaction_cost_and_integer_models(price_frame_data)
     }
     sector_caps = {"technology": 0.6, "communication_services": 0.3, "financials": 0.4, "etf": 0.2}
     latest_prices = prices_df.iloc[-1].to_numpy(dtype=float)
+    lot_sizes = np.array([5, 10, 1, 20, 25], dtype=float)
 
     sector_result = sector_allocation_mean_variance(
         mu,
@@ -261,7 +302,14 @@ def test_sector_allocation_transaction_cost_and_integer_models(price_frame_data)
         total_amount=100000.0,
     )
     cardinality_result = cardinality_min_buy_in(mu, sigma, max_positions=3, min_position_weight=0.05)
-    round_lot_result = round_lot_allocation(mu, sigma, latest_prices, total_amount=100000.0, risk_level=0.5)
+    round_lot_result = round_lot_allocation(
+        mu,
+        sigma,
+        latest_prices,
+        total_amount=100000.0,
+        risk_level=0.5,
+        lot_sizes=lot_sizes,
+    )
 
     assert sector_result["model_name"] == "SectorAllocation"
     assert transaction_result["model_name"] == "TransactionCostRebalancing"
@@ -273,3 +321,5 @@ def test_sector_allocation_transaction_cost_and_integer_models(price_frame_data)
     assert transaction_result["cash_weight"] >= 0.0
     assert cardinality_result["open_positions"] <= 3
     assert round_lot_result["cash_weight"] >= 0.0
+    assert np.allclose(np.mod(round_lot_result["shares"], lot_sizes), 0.0)
+    assert np.allclose(round_lot_result["shares"], round_lot_result["lot_units"] * lot_sizes)

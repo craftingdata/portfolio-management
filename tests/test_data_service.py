@@ -68,7 +68,11 @@ def test_get_market_data_uses_fmp(monkeypatch):
 
     monkeypatch.setattr(data_service, "get_fmp_api_key", lambda: "test-fmp-key")
     monkeypatch.setattr(data_service.httpx, "get", fake_get)
-    monkeypatch.setattr(data_service, "estimate_market_inputs", lambda prices_df, api_key=None: fake_estimated)
+    monkeypatch.setattr(
+        data_service,
+        "estimate_market_inputs",
+        lambda prices_df, api_key=None, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0: fake_estimated,
+    )
 
     prices_df, returns_df, mu, sigma = data_service.get_market_data(["AAPL", "MSFT"], period_months=1)
 
@@ -94,8 +98,16 @@ def test_get_market_data_falls_back_to_synthetic_for_non_auth_failure(monkeypatc
         np.array([[0.04, 0.01], [0.01, 0.05]]),
     )
 
-    monkeypatch.setattr(data_service, "_fetch_fmp_market_data", lambda tickers, period_months: (_ for _ in ()).throw(RuntimeError("upstream fmp error")))
-    monkeypatch.setattr(data_service, "_generate_synthetic_data", lambda tickers, n_days: expected)
+    monkeypatch.setattr(
+        data_service,
+        "_fetch_fmp_market_data",
+        lambda tickers, period_months, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0: (_ for _ in ()).throw(RuntimeError("upstream fmp error")),
+    )
+    monkeypatch.setattr(
+        data_service,
+        "_generate_synthetic_data",
+        lambda tickers, n_days, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0: expected,
+    )
 
     actual = data_service.get_market_data(["AAPL", "MSFT"], period_months=1)
 

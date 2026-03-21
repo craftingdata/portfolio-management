@@ -1,9 +1,19 @@
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FactorModelData:
+    factor_names: List[str]
+    exposure_matrix: np.ndarray
+    factor_covariance: np.ndarray
+    specific_variance: np.ndarray
+    implied_covariance: np.ndarray
 
 
 def compute_metrics(weights: np.ndarray, mu: np.ndarray, sigma: np.ndarray, risk_free_rate: float = 0.04):
@@ -738,6 +748,10 @@ def run_all_models(
     total_amount: float = 1.0,
     max_positions: Optional[int] = None,
     min_position_weight: Optional[float] = None,
+    factor_exposures: Optional[Dict[str, Dict[str, float]]] = None,
+    factor_covariance: Optional[Dict[str, Dict[str, float]]] = None,
+    specific_risk: Optional[Dict[str, float]] = None,
+    lot_sizes: Optional[np.ndarray] = None,
 ) -> dict:
     """
     Run all core portfolio optimization models.
@@ -821,17 +835,25 @@ def run_all_models(
         (risk_parity, {"mu": mu, "sigma": sigma, "risk_free_rate": risk_free_rate}),
     ]
 
-    if returns_df is not None:
+    if returns_df is not None or factor_exposures is not None:
         model_specs.extend([
             (factor_utility_maximization, {
                 "mu": mu,
+                "tickers": tickers,
                 "returns_df": returns_df,
+                "factor_exposures": factor_exposures,
+                "factor_covariance": factor_covariance,
+                "specific_risk": specific_risk,
                 "risk_aversion": _risk_aversion_from_risk_level(risk_level),
                 "risk_free_rate": risk_free_rate,
             }),
             (factor_variance_constraint, {
                 "mu": mu,
+                "tickers": tickers,
                 "returns_df": returns_df,
+                "factor_exposures": factor_exposures,
+                "factor_covariance": factor_covariance,
+                "specific_risk": specific_risk,
                 "risk_level": risk_level,
                 "risk_free_rate": risk_free_rate,
             }),
@@ -879,6 +901,7 @@ def run_all_models(
             "latest_prices": latest_prices,
             "total_amount": total_amount,
             "risk_level": risk_level,
+            "lot_sizes": lot_sizes,
             "risk_free_rate": risk_free_rate,
         }))
 
@@ -902,7 +925,7 @@ def run_all_models(
     return results
 
 
-def _build_market_factor_components(returns_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _build_market_factor_components(returns_df: pd.DataFrame) -> FactorModelData:
     returns_df = returns_df.dropna(axis=0, how="any")
     if returns_df.empty or returns_df.shape[1] < 2:
         raise ValueError("Factor model requires at least two aligned return series")
@@ -930,36 +953,115 @@ def _build_market_factor_components(returns_df: pd.DataFrame) -> tuple[np.ndarra
     specific_matrix = np.diag(np.array(specific_variances, dtype=float))
     implied_covariance = exposure_matrix @ factor_covariance @ exposure_matrix.T + specific_matrix
     implied_covariance = _ensure_positive_semidefinite(implied_covariance)
-    return exposure_matrix, factor_covariance, specific_matrix, implied_covariance
+    return FactorModelData(
+        factor_names=["market"],
+        exposure_matrix=exposure_matrix,
+        factor_covariance=factor_covariance,
+        specific_variance=specific_matrix,
+        implied_covariance=implied_covariance,
+    )
+
+
+def _build_factor_model_from_contract(
+    tickers: List[str],
+    factor_exposures: Optional[Dict[str, Dict[str, float]]],
+    factor_covariance: Optional[Dict[str, Dict[str, float]]],
+    specific_risk: Optional[Dict[str, float]],
+    returns_df: Optional[pd.DataFrame],
+) -> FactorModelData:
+    if factor_exposures is None and factor_covariance is None and specific_risk is None:
+        if returns_df is None:
+            raise ValueError("returns_df is required when explicit factor inputs are not provided")
+        return _build_market_factor_components(returns_df)
+
+    if factor_exposures is None or factor_covariance is None or specific_risk is None:
+        raise ValueError("factor_exposures, factor_covariance, and specific_risk must be provided together")
+
+    factor_names = list(factor_covariance.keys())
+    if not factor_names:
+        raise ValueError("factor_covariance must contain at least one factor")
+
+    for factor_name in factor_names:
+        row = factor_covariance.get(factor_name, {})
+        if set(row.keys()) != set(factor_names):
+            raise ValueError("factor_covariance must be a square matrix over a consistent factor set")
+
+    exposure_rows = []
+    specific_values = []
+    for ticker in tickers:
+        ticker_exposures = factor_exposures.get(ticker)
+        if ticker_exposures is None:
+            raise ValueError(f"Missing factor exposures for ticker {ticker}")
+        if set(ticker_exposures.keys()) != set(factor_names):
+            raise ValueError(f"Factor exposures for {ticker} must match factor_covariance keys")
+        exposure_rows.append([float(ticker_exposures[factor_name]) for factor_name in factor_names])
+
+        if ticker not in specific_risk:
+            raise ValueError(f"Missing specific_risk entry for ticker {ticker}")
+        specific_value = float(specific_risk[ticker])
+        if specific_value < 0.0:
+            raise ValueError("specific_risk values must be non-negative")
+        specific_values.append(specific_value)
+
+    exposure_matrix = np.array(exposure_rows, dtype=float)
+    factor_covariance_matrix = np.array(
+        [[float(factor_covariance[row_factor][column_factor]) for column_factor in factor_names] for row_factor in factor_names],
+        dtype=float,
+    )
+    if factor_covariance_matrix.shape[0] != factor_covariance_matrix.shape[1]:
+        raise ValueError("factor_covariance must be square")
+    if not np.allclose(factor_covariance_matrix, factor_covariance_matrix.T, atol=1e-8):
+        raise ValueError("factor_covariance must be symmetric")
+
+    specific_matrix = np.diag(np.array(specific_values, dtype=float))
+    implied_covariance = exposure_matrix @ factor_covariance_matrix @ exposure_matrix.T + specific_matrix
+    implied_covariance = _ensure_positive_semidefinite(implied_covariance)
+    return FactorModelData(
+        factor_names=factor_names,
+        exposure_matrix=exposure_matrix,
+        factor_covariance=factor_covariance_matrix,
+        specific_variance=specific_matrix,
+        implied_covariance=implied_covariance,
+    )
 
 
 def factor_utility_maximization(
     mu: np.ndarray,
-    returns_df: pd.DataFrame,
+    tickers: List[str],
+    returns_df: Optional[pd.DataFrame] = None,
+    factor_exposures: Optional[Dict[str, Dict[str, float]]] = None,
+    factor_covariance: Optional[Dict[str, Dict[str, float]]] = None,
+    specific_risk: Optional[Dict[str, float]] = None,
     risk_aversion: float = 1.0,
     risk_free_rate: float = 0.04,
 ) -> dict:
-    exposures, factor_covariance, specific_matrix, implied_covariance = _build_market_factor_components(returns_df)
-    result = utility_maximization(mu, implied_covariance, risk_aversion=risk_aversion, risk_free_rate=risk_free_rate)
+    factor_model = _build_factor_model_from_contract(tickers, factor_exposures, factor_covariance, specific_risk, returns_df)
+    result = utility_maximization(mu, factor_model.implied_covariance, risk_aversion=risk_aversion, risk_free_rate=risk_free_rate)
     result["model_name"] = "FactorUtilityMaximization"
-    result["factor_exposures"] = exposures
-    result["factor_covariance"] = factor_covariance
-    result["specific_risk"] = specific_matrix
+    result["factor_names"] = factor_model.factor_names
+    result["factor_exposures"] = factor_model.exposure_matrix
+    result["factor_covariance"] = factor_model.factor_covariance
+    result["specific_risk"] = factor_model.specific_variance
     return result
 
 
 def factor_variance_constraint(
     mu: np.ndarray,
-    returns_df: pd.DataFrame,
+    tickers: List[str],
+    returns_df: Optional[pd.DataFrame] = None,
+    factor_exposures: Optional[Dict[str, Dict[str, float]]] = None,
+    factor_covariance: Optional[Dict[str, Dict[str, float]]] = None,
+    specific_risk: Optional[Dict[str, float]] = None,
     risk_level: float = 0.5,
     risk_free_rate: float = 0.04,
 ) -> dict:
-    exposures, factor_covariance, specific_matrix, implied_covariance = _build_market_factor_components(returns_df)
-    result = mean_variance(mu, implied_covariance, risk_level=risk_level, risk_free_rate=risk_free_rate)
+    factor_model = _build_factor_model_from_contract(tickers, factor_exposures, factor_covariance, specific_risk, returns_df)
+    result = mean_variance(mu, factor_model.implied_covariance, risk_level=risk_level, risk_free_rate=risk_free_rate)
     result["model_name"] = "FactorVarianceConstraint"
-    result["factor_exposures"] = exposures
-    result["factor_covariance"] = factor_covariance
-    result["specific_risk"] = specific_matrix
+    result["factor_names"] = factor_model.factor_names
+    result["factor_exposures"] = factor_model.exposure_matrix
+    result["factor_covariance"] = factor_model.factor_covariance
+    result["specific_risk"] = factor_model.specific_variance
     return result
 
 
@@ -1233,7 +1335,7 @@ def round_lot_allocation(
 
     target_return = float(np.min(mu) + (np.max(mu) - np.min(mu)) * risk_level)
     weights = None
-    shares = None
+    lot_units = None
 
     try:
         from pyscipopt import Model, quicksum
@@ -1254,7 +1356,7 @@ def round_lot_allocation(
         model.optimize()
 
         if model.getStatus() == "optimal":
-            shares = np.array([model.getVal(units[index]) for index in range(n)], dtype=float)
+            lot_units = np.array([model.getVal(units[index]) for index in range(n)], dtype=float)
             weights = np.array([model.getVal(x[index]) for index in range(n)], dtype=float)
         else:
             raise ValueError(f"SCIP status: {model.getStatus()}")
@@ -1262,17 +1364,20 @@ def round_lot_allocation(
         logger.warning("RoundLotAllocation SCIP failed (%s), falling back to scipy", exc)
         continuous = mean_variance(mu, sigma, risk_level=risk_level, risk_free_rate=risk_free_rate)["weights"]
         notional = total_amount * continuous
-        shares = np.floor(notional / np.maximum(latest_prices * lot_sizes, 1e-8))
-        invested = shares * latest_prices * lot_sizes
+        lot_units = np.floor(notional / np.maximum(latest_prices * lot_sizes, 1e-8))
+        invested = lot_units * latest_prices * lot_sizes
         weights = invested / total_amount
 
     cash_weight = float(max(0.0, 1.0 - float(np.sum(weights))))
+    shares = np.array(lot_units, dtype=float) * lot_sizes
     expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
     return {
         "model_name": "RoundLotAllocation",
         "weights": weights,
         "cash_weight": cash_weight,
         "shares": shares,
+        "lot_units": np.array(lot_units, dtype=float),
+        "lot_sizes": np.array(lot_sizes, dtype=float),
         "expected_return": expected_return + cash_weight * risk_free_rate,
         "expected_risk": expected_risk,
         "sharpe_ratio": sharpe_ratio,

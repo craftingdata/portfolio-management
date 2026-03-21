@@ -8,6 +8,10 @@ class OptimizeRequest(BaseModel):
     investment_horizon: Union[int, str] = Field(..., description='Months as int or "short"/"medium"/"long"')
     tickers: Optional[List[str]] = Field(None, description="Custom tickers list; defaults to diversified set")
     risk_free_rate: Optional[float] = Field(0.04, description="Annual risk-free rate (default 4%)")
+    return_estimator: Optional[str] = Field("sample", description="Return estimator: sample or shrunk_mean")
+    covariance_estimator: Optional[str] = Field("sample", description="Covariance estimator: sample or diagonal_shrinkage")
+    mean_shrinkage: Optional[float] = Field(0.0, ge=0.0, le=1.0, description="Shrinkage intensity for shrunk_mean return estimation")
+    covariance_shrinkage: Optional[float] = Field(0.0, ge=0.0, le=1.0, description="Shrinkage intensity for diagonal covariance shrinkage")
     max_gross_exposure: Optional[float] = Field(1.5, ge=1.0, description="Maximum gross exposure for long-short portfolios")
     max_short_exposure: Optional[float] = Field(0.5, ge=0.0, description="Maximum absolute short exposure per asset")
     max_cash_borrow: Optional[float] = Field(0.25, ge=0.0, description="Maximum borrowable cash sleeve as a fraction of portfolio value")
@@ -18,6 +22,10 @@ class OptimizeRequest(BaseModel):
     max_positions: Optional[int] = Field(None, ge=1, description="Maximum number of open positions for cardinality-constrained optimization")
     min_position_weight: Optional[float] = Field(None, ge=0.0, description="Minimum portfolio weight for a newly opened position")
     sector_max_weights: Optional[Dict[str, float]] = Field(None, description="Optional maximum sector weights keyed by normalized sector name")
+    factor_exposures: Optional[Dict[str, Dict[str, float]]] = Field(None, description="Optional factor exposures keyed by ticker then factor name")
+    factor_covariance: Optional[Dict[str, Dict[str, float]]] = Field(None, description="Optional factor covariance keyed by factor name")
+    specific_risk: Optional[Dict[str, float]] = Field(None, description="Optional annualized specific variance keyed by ticker")
+    lot_sizes: Optional[Dict[str, int]] = Field(None, description="Optional lot size or minimum tradable unit keyed by ticker")
 
     @field_validator("risk_tolerance", mode="before")
     @classmethod
@@ -42,6 +50,41 @@ class OptimizeRequest(BaseModel):
         if int(v) <= 0:
             raise ValueError("investment_horizon months must be positive")
         return int(v)
+
+    @field_validator("return_estimator", mode="before")
+    @classmethod
+    def validate_return_estimator(cls, v):
+        if v is None:
+            return "sample"
+        value = str(v).strip().lower()
+        allowed = {"sample", "shrunk_mean"}
+        if value not in allowed:
+            raise ValueError(f"return_estimator must be one of {sorted(allowed)}")
+        return value
+
+    @field_validator("covariance_estimator", mode="before")
+    @classmethod
+    def validate_covariance_estimator(cls, v):
+        if v is None:
+            return "sample"
+        value = str(v).strip().lower()
+        allowed = {"sample", "diagonal_shrinkage"}
+        if value not in allowed:
+            raise ValueError(f"covariance_estimator must be one of {sorted(allowed)}")
+        return value
+
+    @field_validator("lot_sizes")
+    @classmethod
+    def validate_lot_sizes(cls, v):
+        if v is None:
+            return v
+        normalized = {}
+        for ticker, lot_size in v.items():
+            integer_lot_size = int(lot_size)
+            if integer_lot_size <= 0:
+                raise ValueError("lot_sizes must contain positive integers")
+            normalized[str(ticker).upper().strip()] = integer_lot_size
+        return normalized
 
 
 class PortfolioResult(BaseModel):

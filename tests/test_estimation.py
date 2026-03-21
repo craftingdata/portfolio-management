@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from app.services import estimation
 
@@ -88,3 +89,41 @@ def test_estimate_market_inputs_keeps_covariance_positive_definite(monkeypatch):
 
     eigvals = np.linalg.eigvalsh(result.sigma_matrix)
     assert np.all(eigvals > 0)
+
+
+def test_estimate_market_inputs_supports_explicit_estimators(monkeypatch):
+    prices_df = pd.DataFrame(
+        {
+            "AAPL": [100.0, 101.0, 104.0, 103.0, 106.0],
+            "MSFT": [200.0, 202.0, 204.0, 205.0, 207.0],
+            "GOOGL": [300.0, 304.0, 306.0, 309.0, 312.0],
+        },
+        index=pd.date_range("2024-01-01", periods=5, freq="B"),
+    )
+
+    monkeypatch.setattr(estimation, "get_toolkit_class", lambda: (_ for _ in ()).throw(AssertionError("should not build toolkit")))
+
+    sample = estimation.estimate_market_inputs(prices_df)
+    shrunk = estimation.estimate_market_inputs(
+        prices_df,
+        return_estimator="shrunk_mean",
+        covariance_estimator="diagonal_shrinkage",
+        mean_shrinkage=0.5,
+        covariance_shrinkage=0.4,
+    )
+
+    assert sample.mu.shape == shrunk.mu.shape == (3,)
+    assert sample.sigma_matrix.shape == shrunk.sigma_matrix.shape == (3, 3)
+    assert not np.allclose(sample.mu, shrunk.mu)
+    assert np.all(np.isfinite(shrunk.mu))
+    assert np.all(np.linalg.eigvalsh(shrunk.sigma_matrix) > 0)
+
+
+def test_estimate_market_inputs_requires_minimum_history():
+    prices_df = pd.DataFrame(
+        {"AAPL": [100.0, 101.0], "MSFT": [200.0, 201.0]},
+        index=pd.date_range("2024-01-01", periods=2, freq="B"),
+    )
+
+    with pytest.raises(ValueError, match="At least three price observations"):
+        estimation.estimate_market_inputs(prices_df)

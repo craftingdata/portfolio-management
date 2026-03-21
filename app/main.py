@@ -46,12 +46,19 @@ def optimize(request: OptimizeRequest):
         prices_df, returns_df, mu, sigma = get_market_data(
             tickers=request.tickers,
             period_months=period_months,
+            return_estimator=request.return_estimator,
+            covariance_estimator=request.covariance_estimator,
+            mean_shrinkage=request.mean_shrinkage,
+            covariance_shrinkage=request.covariance_shrinkage,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Data fetch error: {str(e)}")
 
     tickers = list(prices_df.columns)
     latest_prices = prices_df.iloc[-1].to_numpy(dtype=float)
+    lot_sizes = None
+    if request.lot_sizes:
+        lot_sizes = [float(request.lot_sizes.get(ticker, 1)) for ticker in tickers]
     period_used = f"{len(prices_df)} trading days"
 
     sector_metadata = None
@@ -91,6 +98,10 @@ def optimize(request: OptimizeRequest):
             total_amount=request.total_amount,
             max_positions=request.max_positions,
             min_position_weight=request.min_position_weight,
+            factor_exposures=request.factor_exposures,
+            factor_covariance=request.factor_covariance,
+            specific_risk=request.specific_risk,
+            lot_sizes=lot_sizes,
         )
         efficient_frontier = generate_efficient_frontier(
             mu=mu,

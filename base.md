@@ -112,7 +112,7 @@ The next model should be aware of these repo-specific realities:
 - `data_service.py` currently mixes provider concerns, cleaning, and estimation orchestration in one file.
 - `optimization.py` currently exposes one function per strategy plus `run_all_models()`. It now includes utility, leverage, and turnover-aware models, but it is still not split into model-builder abstractions.
 - `ranking.py` now blends heuristic tables with realized optimizer output quality and frontier context.
-- The API request model now exposes leverage and turnover controls plus current weights, but it still does not expose estimator selection, factor data, sector metadata, or transaction-cost inputs.
+- The API request model now exposes leverage, turnover, sector-cap, transaction-cost, market-impact, basic cardinality controls, estimator selection, explicit factor-model inputs, and configurable lot sizes, but the surrounding provider and validation layers are still relatively thin.
 - Synthetic fallback still exists in `data_service.py`; it should be treated as test/degradation behavior, not as a preferred production path.
 - FinanceToolkit diagnostics are best-effort. The optimizer should not depend on FinanceToolkit outputs to function.
 
@@ -124,7 +124,7 @@ The focused command that already passes after the latest changes is:
 uv run pytest tests -q
 ```
 
-Most recent verified result before this handoff: `34 passed`.
+Most recent verified result before this handoff: `38 passed`.
 
 General repo test command:
 
@@ -134,15 +134,14 @@ uv run pytest tests -q
 
 ## Gaps Versus the Broader Gurobi Notebook Family
 
-The repo is still missing major categories that appear in the Gurobi finance notebook collection:
+The repo now has first-pass implementations for the major advanced notebook families, but it is still short of broader parity in a few important areas:
 
-- factor model formulations
-- sector and metadata-aware constraints
-- cardinality and minimum-buy constraints
-- round-lot constraints
-- transaction-cost-aware optimization
-- market-impact approximations
-- portfolio rebalancing with transaction costs
+- richer factor-model infrastructure beyond the current market-factor proxy
+- broader metadata normalization, ETF handling, and sector/industry semantics
+- richer lot-size semantics beyond the current one-share default
+- deeper transaction-cost calibration, including per-asset or broker-specific assumptions
+- more rigorous market-impact modeling and calibration
+- provider abstraction and estimator configurability hardening
 
 ## Coverage Verification
 
@@ -157,7 +156,7 @@ What was missing before this update:
 
 After the additions below, `base.md` should be sufficient for another model to implement the techniques incrementally without first re-reading the Gurobi notebook index.
 
-Current coverage is better than the previous version of this handoff: the repo now has direct implementations and tests for the basic Markowitz family, efficient frontier generation, leverage variants, turnover-constrained rebalancing, and output-aware ranking.
+Current coverage is better than the previous version of this handoff: the repo now has direct implementations and tests for the basic Markowitz family, efficient frontier generation, leverage variants, turnover-constrained rebalancing, factor-model variants, sector-constrained optimization, transaction-cost-aware rebalancing, cardinality/minimum-buy-in, round-lot allocation, and output-aware ranking.
 
 ## Source Of Truth And Retrieval Pointers
 
@@ -313,9 +312,9 @@ Mark the technique as fully implemented only if all of the following are true:
 
 If any of those are missing, the technique should still be treated as omitted or only partially implemented.
 
-## What Is Actually Gated By The Current Omissions
+## What Is Actually Gated By The Remaining Parity Gaps
 
-Not all omissions are equal. Some features can be implemented immediately in solver code, while others are gated by missing inputs, missing metadata, or missing API contract surface.
+Not all remaining parity work is equal. Some items are implementation cleanup or calibration work, while others still need richer data contracts or more explicit product semantics.
 
 ### Not Gated Or Only Lightly Gated
 
@@ -336,33 +335,33 @@ These require solver work plus small schema or orchestration changes, but are no
 - turnover limits
   - blocker type: implemented in solver and schema; remaining work is holdings validation and richer rebalance scenarios
 
-### Heavily Gated By Missing Data Or Metadata
+### Heavily Gated By Richer Data Or Metadata
 
-These should not be treated as pure `optimization.py` tasks because the real blocker is upstream input availability:
+These are no longer absent from the repo, but the remaining parity work is still upstream-data-sensitive:
 
 - sector allocation constraints
-  - blocker type: missing market-data metadata support
-  - current gap: `app/services/data_service.py` fetches prices only and does not fetch sector metadata
+  - blocker type: richer metadata normalization and ETF handling
+  - current gap: sector metadata retrieval exists, but normalization policy and broader taxonomy support are still limited
 - factor model objective and constraint variants
-  - blocker type: missing factor data source
-  - current gap: the repo does not currently source factor exposures, factor covariance, or specific risk inputs
+  - blocker type: richer factor data source
+  - current gap: the repo currently derives a simple market-factor proxy rather than maintaining a reusable exposure matrix, factor covariance, and specific-risk pipeline across broader factor families
 - round-lot constraints
-  - blocker type: missing lot-size and pricing semantics
-  - current gap: current pipeline is weight-based and request schema does not expose lot-size or unit-level trading inputs
+  - blocker type: richer lot-size and execution semantics
+  - current gap: the current implementation assumes one-share lots by default and does not yet support market-specific lot metadata
 
-### Heavily Gated By Both Data And Contract Surface
+### Heavily Gated By Richer Trading Semantics
 
-These require a broader addition across schema, orchestration, and solver layers:
+These have first-pass support, but parity work still spans schema, orchestration, calibration, and solver behavior:
 
 - rebalancing with transaction costs
-  - blocker type: missing trade variables and cost parameters, plus richer rebalance orchestration
-  - current gap: `OptimizeRequest` already has `current_weights`, and the optimizer already has turnover-constrained rebalancing, but there is still no explicit buy/sell formulation with transaction costs
+  - blocker type: richer trade and budget semantics
+  - current gap: the repo now models buy/sell variables with proportional costs, but fixed-fee variants, share-level rebalance semantics, and richer broker schedules are still absent
 - transaction-cost-aware investing
-  - blocker type: missing cost parameters plus missing trade formulation
-  - current gap: current optimizer allocates end-state weights only; it does not model buys and sells explicitly
+  - blocker type: calibration depth
+  - current gap: the current optimizer supports proportional costs, but not a broader family of per-asset, broker-specific, or fixed-charge models
 - market-impact modeling
-  - blocker type: missing trade-size modeling plus missing impact parameters
-  - current gap: no transaction-level decision variables or impact coefficients exist in the request model or optimizer
+  - blocker type: model fidelity and calibration
+  - current gap: the repo now supports a linear ADV-based penalty path, but not a deeper calibration workflow or richer nonlinear formulations
 
 ### Ranking Is Gated By Upstream Outputs
 
@@ -418,10 +417,10 @@ These are not ready as pure solver tasks because the contract and modeling input
 
 ### Practical Answer
 
-The remaining gaps are not all ready for implementation.
+The remaining parity gaps are not all the same kind of work.
 
-- ready now: cleanup and hardening work around already-implemented continuous, leverage, and turnover models
-- gated by missing information or upstream inputs: factor models, sector constraints, round lots, transaction costs, and market impact
+- ready now: provider cleanup, estimator hardening, richer validation, README/base.md reconciliation, and calibration work around already-implemented advanced models
+- still partially gated by richer inputs or semantics: broader factor pipelines, richer sector normalization, fuller lot metadata, deeper transaction-cost schedules, and higher-fidelity market-impact modeling
 
 ## Which Gates Can Be Removed By FMP Or FinanceToolkit
 
@@ -847,8 +846,9 @@ How to obtain it:
 What this means:
 
 - the repo already has a working source for price history
-- the repo does not yet have first-class retrieval for sector metadata, factor exposures, liquidity proxies, lot sizes, or transaction-cost inputs
-- those inputs must be added explicitly to `app/services/data_service.py` or another provider module before solver work can be considered complete
+- the repo now has first-class retrieval for sector metadata and average daily dollar volume in `app/services/data_service.py`
+- the repo still does not maintain a reusable external factor-data pipeline or richer lot-size metadata beyond the current first-pass assumptions
+- broader parity work now centers on turning the available provider data into cleaner internal abstractions and richer calibration inputs
 
 ### FMP Endpoint Map For Remaining Provider Work
 
@@ -928,7 +928,7 @@ Decisions that still remain:
 
 Implementation status:
 
-- gated by missing upstream factor data and estimation implementation
+- implemented as a first-pass market-factor proxy; remaining work is broader factor-family support and a cleaner reusable factor-data pipeline
 
 ### Sector Allocation Constraints
 
@@ -964,7 +964,7 @@ Decisions that still remain:
 
 Implementation status:
 
-- partially gated by missing metadata retrieval and normalization implementation
+- implemented in a first-pass form using FMP profile sector data; remaining work is broader normalization, ETF treatment, and richer taxonomy support
 
 ### Cardinality And Minimum Buy-In
 
@@ -1001,7 +1001,7 @@ Decisions that still remain:
 
 Implementation status:
 
-- ready for implementation once request fields and SCIP-first solver wiring are added
+- implemented in a first-pass form with schema support, SCIP-first wiring, and focused tests; remaining work is richer per-asset threshold semantics if needed
 
 ### Round Lots
 
@@ -1037,7 +1037,7 @@ Decisions that still remain:
 
 Implementation status:
 
-- ready for implementation once latest-price retrieval, lot metadata, and integer result packaging are added
+- implemented in a first-pass form using latest prices and a one-share default lot assumption; remaining work is richer lot metadata and share-level response semantics if the API needs to expose them more explicitly
 
 ### Transaction-Cost-Aware Rebalancing
 
@@ -1077,7 +1077,7 @@ Decisions that still remain:
 
 Implementation status:
 
-- ready for implementation once cost inputs are added to the request contract and wired into the optimizer
+- implemented in a first-pass form with proportional costs, explicit buy/sell variables, and request-level cost inputs; remaining work is richer calibration and fixed-fee or broker-specific variants
 
 ### Market Impact
 
@@ -1116,7 +1116,7 @@ Decisions that still remain:
 
 Implementation status:
 
-- gated by missing liquidity-data retrieval and provider-to-optimizer wiring
+- partially implemented through an ADV-based linear penalty path; remaining work is deeper calibration and richer impact formulations
 
 ### Summary Of What Is Data-Sourced Versus Decision-Gated
 
@@ -1125,12 +1125,13 @@ Data source already live in repo:
 - historical price history from FMP
 - locally estimated returns and covariance
 - optional FinanceToolkit risk diagnostics
+- sector metadata from FMP company profiles
+- average daily dollar volume derived from FMP historical price and volume data
 
 Can likely be obtained with moderate provider extension:
 
-- sector metadata from FMP-style company profile endpoints
 - latest prices from existing or adjacent FMP endpoints
-- recent volume and liquidity proxies from FMP
+- richer lot-size metadata and broader execution-oriented provider inputs
 
 Still requires product or quant decisions before coding:
 
@@ -1362,13 +1363,13 @@ Current repo status:
 
 If another model is given only this file, the correct next implementation sequence is:
 
-1. refactor `app/services/data_service.py` into cleaner provider, cleaning, and metadata helpers without breaking `get_market_data()`
+1. refactor `app/services/data_service.py` into cleaner provider, cleaning, metadata, and liquidity helpers without breaking `get_market_data()`
 2. extend `app/services/estimation.py` with explicit estimator configuration while preserving current defaults
-3. add factor-model support with explicit factor exposures, factor covariance, and specific risk
-4. add sector metadata retrieval and sector-allocation constraints
-5. add transaction-cost and rebalancing formulations with explicit trade variables
+3. deepen factor-model support beyond the current market-factor proxy into a cleaner reusable factor-data pipeline
+4. harden sector, round-lot, transaction-cost, and market-impact calibration semantics toward broader notebook-family parity
+5. keep documentation aligned with the implemented model surface as parity work lands
 
-That sequence aligns directly to the Gurobi notebook progression: data prep first, basic Markowitz second, then richer formulations and constraints.
+That sequence reflects the current state of the repo: first-pass advanced model families already exist, so the remaining work is cleanup, calibration, richer data contracts, and documentation alignment.
 
 ## Priority Order
 
@@ -1376,12 +1377,12 @@ Implement in this order unless the user changes priorities:
 
 1. Provider abstraction and data pipeline cleanup
 2. Estimation pipeline hardening
-3. Base Markowitz parity already implemented; keep extending validation and documentation as needed
-4. Factor model support
-5. Portfolio constraint families
-6. Rebalancing and transaction costs
-7. Ranking cleanup
-8. API expansion and documentation alignment
+3. Richer factor-model support
+4. Portfolio-constraint hardening and richer metadata semantics
+5. Transaction-cost and market-impact calibration depth
+6. Ranking cleanup for richer output families
+7. API refinement only where new parity work truly requires it
+8. Documentation alignment as parity work lands
 
 ## Priority 1: Provider Abstraction And Data Pipeline Cleanup
 

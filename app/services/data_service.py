@@ -129,6 +129,10 @@ def _fetch_fmp_average_daily_dollar_volume(
 def _fetch_fmp_market_data(
     tickers: List[str],
     period_months: int,
+    return_estimator: str = "sample",
+    covariance_estimator: str = "sample",
+    mean_shrinkage: float = 0.0,
+    covariance_shrinkage: float = 0.0,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     """Fetch aligned historical prices from FMP and derive annualized returns and covariance."""
     api_key = get_fmp_api_key()
@@ -151,7 +155,14 @@ def _fetch_fmp_market_data(
     if prices_df.empty or len(prices_df.columns) < 2:
         raise ValueError("Insufficient FMP price data after cleaning")
 
-    estimated = estimate_market_inputs(prices_df, api_key=api_key)
+    estimated = estimate_market_inputs(
+        prices_df,
+        api_key=api_key,
+        return_estimator=return_estimator,
+        covariance_estimator=covariance_estimator,
+        mean_shrinkage=mean_shrinkage,
+        covariance_shrinkage=covariance_shrinkage,
+    )
 
     logger.info("Successfully fetched FMP data for %s over %s days", list(prices_df.columns), len(prices_df))
     return prices_df, estimated.returns_df, estimated.mu, estimated.sigma_matrix
@@ -225,7 +236,14 @@ def get_market_liquidity(
     return liquidity
 
 
-def _generate_synthetic_data(tickers: List[str], n_days: int = 756) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
+def _generate_synthetic_data(
+    tickers: List[str],
+    n_days: int = 756,
+    return_estimator: str = "sample",
+    covariance_estimator: str = "sample",
+    mean_shrinkage: float = 0.0,
+    covariance_shrinkage: float = 0.0,
+) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     """Generate synthetic price data using geometric Brownian motion."""
     np.random.seed(42)
     n = len(tickers)
@@ -304,14 +322,24 @@ def _generate_synthetic_data(tickers: List[str], n_days: int = 756) -> Tuple[pd.
     start_date = pd.Timestamp.today().normalize() - pd.offsets.BDay(n_days)
     dates = pd.bdate_range(start=start_date, periods=n_days + 1)
     prices_df = pd.DataFrame(prices, index=dates, columns=tickers)
-    estimated = estimate_market_inputs(prices_df)
+    estimated = estimate_market_inputs(
+        prices_df,
+        return_estimator=return_estimator,
+        covariance_estimator=covariance_estimator,
+        mean_shrinkage=mean_shrinkage,
+        covariance_shrinkage=covariance_shrinkage,
+    )
 
     return prices_df, estimated.returns_df, estimated.mu, estimated.sigma_matrix
 
 
 def get_market_data(
     tickers: Optional[List[str]] = None,
-    period_months: int = 36
+    period_months: int = 36,
+    return_estimator: str = "sample",
+    covariance_estimator: str = "sample",
+    mean_shrinkage: float = 0.0,
+    covariance_shrinkage: float = 0.0,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     """
     Fetch market data from FMP using an Azure Key Vault-backed API key,
@@ -325,10 +353,24 @@ def get_market_data(
     tickers = [t.upper().strip() for t in tickers]
 
     try:
-        return _fetch_fmp_market_data(tickers=tickers, period_months=period_months)
+        return _fetch_fmp_market_data(
+            tickers=tickers,
+            period_months=period_months,
+            return_estimator=return_estimator,
+            covariance_estimator=covariance_estimator,
+            mean_shrinkage=mean_shrinkage,
+            covariance_shrinkage=covariance_shrinkage,
+        )
     except MissingFMPAPIKeyError:
         raise
     except Exception as e:
         logger.warning(f"FMP fetch failed ({e}), using synthetic data for tickers: {tickers}")
         n_days = max(252 * 2, period_months * 21)
-        return _generate_synthetic_data(tickers, n_days=n_days)
+        return _generate_synthetic_data(
+            tickers,
+            n_days=n_days,
+            return_estimator=return_estimator,
+            covariance_estimator=covariance_estimator,
+            mean_shrinkage=mean_shrinkage,
+            covariance_shrinkage=covariance_shrinkage,
+        )

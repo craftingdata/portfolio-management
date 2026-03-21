@@ -31,6 +31,34 @@ def _extract_latest_metric_series(metric_output: pd.DataFrame | pd.Series) -> pd
     return metric_output.iloc[-1]
 
 
+def _estimate_expected_returns(
+    returns_df: pd.DataFrame,
+    method: str,
+    mean_shrinkage: float,
+) -> np.ndarray:
+    sample_mean = returns_df.mean().to_numpy(dtype=float) * 252
+    if method == "sample":
+        return sample_mean
+    if method == "shrunk_mean":
+        grand_mean = float(np.mean(sample_mean))
+        return (1.0 - mean_shrinkage) * sample_mean + mean_shrinkage * grand_mean
+    raise ValueError(f"Unsupported return estimator: {method}")
+
+
+def _estimate_covariance_matrix(
+    returns_df: pd.DataFrame,
+    method: str,
+    covariance_shrinkage: float,
+) -> np.ndarray:
+    sample_covariance = returns_df.cov().to_numpy(dtype=float) * 252
+    if method == "sample":
+        return sample_covariance
+    if method == "diagonal_shrinkage":
+        diagonal_target = np.diag(np.diag(sample_covariance))
+        return (1.0 - covariance_shrinkage) * sample_covariance + covariance_shrinkage * diagonal_target
+    raise ValueError(f"Unsupported covariance estimator: {method}")
+
+
 def get_toolkit_class() -> Type:
     from financetoolkit import Toolkit
 
@@ -40,11 +68,25 @@ def get_toolkit_class() -> Type:
 def estimate_market_inputs(
     prices_df: pd.DataFrame,
     api_key: str | None = None,
+    return_estimator: str = "sample",
+    covariance_estimator: str = "sample",
+    mean_shrinkage: float = 0.0,
+    covariance_shrinkage: float = 0.0,
 ) -> EstimatedMarketData:
     """Estimate annualized return and covariance from prices and collect FinanceToolkit risk diagnostics when an API key is available."""
+    if prices_df.shape[0] < 3:
+        raise ValueError("At least three price observations are required to estimate market inputs")
+
     returns_df = prices_df.pct_change().dropna()
-    mu = returns_df.mean().to_numpy() * 252
-    sigma_matrix = returns_df.cov().to_numpy() * 252
+    if returns_df.shape[0] < 2:
+        raise ValueError("At least two return observations are required to estimate market inputs")
+
+    mu = _estimate_expected_returns(returns_df, method=return_estimator, mean_shrinkage=float(mean_shrinkage))
+    sigma_matrix = _estimate_covariance_matrix(
+        returns_df,
+        method=covariance_estimator,
+        covariance_shrinkage=float(covariance_shrinkage),
+    )
     sigma_matrix = _ensure_positive_definite(sigma_matrix)
 
     toolkit_risk_metrics: Dict[str, pd.Series] = {}

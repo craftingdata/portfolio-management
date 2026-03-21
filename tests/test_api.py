@@ -6,7 +6,14 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-def _make_mock_market_data(tickers=None, period_months=36):
+def _make_mock_market_data(
+    tickers=None,
+    period_months=36,
+    return_estimator="sample",
+    covariance_estimator="sample",
+    mean_shrinkage=0.0,
+    covariance_shrinkage=0.0,
+):
     """Return synthetic market data for testing without network access."""
     if tickers is None:
         tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "META",
@@ -123,6 +130,71 @@ def test_optimize_numeric_inputs(client):
     assert len(data["portfolios"]) == 13
 
 
+def test_optimize_passes_estimator_configuration(client):
+    captured = {}
+
+    def fake_get_market_data(**kwargs):
+        captured.update(kwargs)
+        return _make_mock_market_data(tickers=kwargs.get("tickers"))
+
+    with patch("app.main.get_market_data", side_effect=fake_get_market_data):
+        response = client.post("/optimize", json={
+            "total_amount": 50000,
+            "risk_tolerance": "medium",
+            "investment_horizon": "medium",
+            "return_estimator": "shrunk_mean",
+            "covariance_estimator": "diagonal_shrinkage",
+            "mean_shrinkage": 0.35,
+            "covariance_shrinkage": 0.25,
+        })
+
+    assert response.status_code == 200, response.text
+    assert captured["return_estimator"] == "shrunk_mean"
+    assert captured["covariance_estimator"] == "diagonal_shrinkage"
+    assert captured["mean_shrinkage"] == 0.35
+    assert captured["covariance_shrinkage"] == 0.25
+
+
+def test_optimize_accepts_factor_contract_and_lot_sizes(client):
+    factor_exposures = {
+        "AAPL": {"market": 1.1, "quality": 0.2},
+        "MSFT": {"market": 1.0, "quality": 0.25},
+        "GOOGL": {"market": 1.05, "quality": 0.1},
+        "AMZN": {"market": 1.15, "quality": -0.05},
+        "META": {"market": 1.08, "quality": 0.0},
+    }
+    factor_covariance = {
+        "market": {"market": 0.04, "quality": 0.01},
+        "quality": {"market": 0.01, "quality": 0.03},
+    }
+    specific_risk = {ticker: 0.02 for ticker in factor_exposures}
+    metadata = {ticker: {"sector": "Technology"} for ticker in factor_exposures}
+
+    with patch("app.main.get_market_data", side_effect=lambda **kwargs: _make_mock_market_data(tickers=list(factor_exposures.keys()))):
+        with patch("app.main.get_market_metadata", return_value=metadata):
+            response = client.post("/optimize", json={
+                "total_amount": 100000,
+                "risk_tolerance": "medium",
+                "investment_horizon": "long",
+                "tickers": list(factor_exposures.keys()),
+                "factor_exposures": factor_exposures,
+                "factor_covariance": factor_covariance,
+                "specific_risk": specific_risk,
+                "lot_sizes": {"AAPL": 5, "MSFT": 10, "GOOGL": 5, "AMZN": 1, "META": 1},
+                "sector_max_weights": {"technology": 0.8},
+                "max_positions": 3,
+            })
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    model_names = {portfolio["model_name"] for portfolio in data["portfolios"]}
+    assert "FactorUtilityMaximization" in model_names
+    assert "FactorVarianceConstraint" in model_names
+    assert "RoundLotAllocation" in model_names
+    assert "SectorAllocation" in model_names
+    assert "CardinalityMinBuyIn" in model_names
+
+
 def test_optimize_low_risk(client):
     with patch("app.main.get_market_data", side_effect=_make_mock_market_data):
         response = client.post("/optimize", json={
@@ -169,6 +241,17 @@ def test_validation_invalid_risk_tolerance(client):
         "risk_tolerance": "extreme",
         "investment_horizon": "medium",
     })
+    assert response.status_code == 422
+
+
+def test_validation_invalid_estimator_choice(client):
+    response = client.post("/optimize", json={
+        "total_amount": 10000,
+        "risk_tolerance": "medium",
+        "investment_horizon": "medium",
+        "return_estimator": "unsupported",
+    })
+
     assert response.status_code == 422
 
 

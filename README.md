@@ -1,31 +1,57 @@
 # Portfolio Management API
 
-A Python portfolio optimization system using SCIP (via [PySCIPOpt](https://github.com/scipopt/PySCIPOpt)) and [FastAPI](https://fastapi.tiangolo.com/). Given a total investment amount, risk tolerance, and investment horizon, the API runs multiple portfolio optimization models and returns the results ranked by applicability to the specified inputs.
+A Python portfolio optimization service built with [FastAPI](https://fastapi.tiangolo.com/), [PySCIPOpt](https://github.com/scipopt/PySCIPOpt), SciPy, and Financial Modeling Prep data sourced through Azure Key Vault-backed credentials. Given a total investment amount, risk tolerance, and investment horizon, the API runs a family of portfolio constructors and returns the results ranked by applicability.
 
-## Portfolio Optimization Models
+The repository now covers the core Markowitz family plus a first-pass set of richer Gurobi-inspired portfolio construction models.
 
-The system implements six portfolio optimization techniques based on the [Gurobi Finance modeling notebooks](https://gurobi-finance.readthedocs.io/en/latest/modeling_notebooks.html), re-implemented using the open-source SCIP solver:
+## Current Model Surface
 
-| Model               | Description                                                                                                             | Best For                               |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| **MinimumVariance** | Minimizes portfolio variance (risk). Solves `min xᵀΣx` s.t. `Σxᵢ=1, xᵢ≥0`.                                              | Conservative investors, short horizons |
-| **MaximumReturn**   | Maximizes expected return within a risk budget. Solves `max μᵀx` s.t. `xᵀΣx ≤ σ²_max`.                                  | Aggressive investors, long horizons    |
-| **MaxSharpeRatio**  | Maximizes risk-adjusted return (Sharpe ratio / tangency portfolio). Uses parametric sweep with SCIP + scipy refinement. | Balanced risk/return                   |
-| **MeanVariance**    | Classic Markowitz mean-variance optimization. Minimizes variance subject to a target return derived from risk/horizon.  | Moderate investors                     |
-| **EqualWeight**     | Simple 1/n equal allocation. Robust, no optimization required.                                                          | High uncertainty, very short horizons  |
-| **RiskParity**      | Equalizes risk contributions from each asset. Solved via scipy SLSQP.                                                   | Balanced diversification               |
+The API currently exposes 16 model families through `GET /models` and returns the active set from `POST /optimize`.
+
+### Core Continuous Models
+
+| Model                 | Description                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------------- |
+| `MinimumVariance`     | Minimize portfolio variance subject to full investment and long-only bounds.                   |
+| `MaximumReturn`       | Maximize expected return under a risk budget.                                                  |
+| `UtilityMaximization` | Maximize expected utility with explicit risk aversion.                                         |
+| `MaxSharpeRatio`      | Maximize risk-adjusted return using a tangency-style search and SciPy refinement.              |
+| `MeanVariance`        | Classic Markowitz mean-variance optimization with a target return derived from risk tolerance. |
+| `EqualWeight`         | Equal allocation baseline.                                                                     |
+| `RiskParity`          | Equalize risk contributions across assets.                                                     |
+
+### Leverage And Rebalancing Models
+
+| Model                        | Description                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| `LeverageShortSelling`       | Long-short utility optimization with gross leverage and short exposure limits.     |
+| `LeverageBorrowing`          | Utility optimization with an explicit cash sleeve and borrowing allowance.         |
+| `TurnoverConstrained`        | Mean-variance rebalancing with explicit turnover limits from current weights.      |
+| `TransactionCostRebalancing` | Rebalancing model with explicit buy/sell variables and proportional trading costs. |
+
+### Advanced First-Pass Models
+
+| Model                       | Description                                                                                                       |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `FactorUtilityMaximization` | Utility maximization using either an explicit factor contract or a market-factor-implied covariance matrix.       |
+| `FactorVarianceConstraint`  | Mean-variance optimization using either an explicit factor contract or a market-factor-implied covariance matrix. |
+| `SectorAllocation`          | Mean-variance optimization with sector concentration caps.                                                        |
+| `CardinalityMinBuyIn`       | Mean-variance optimization with a maximum holdings count and minimum buy-in weights.                              |
+| `RoundLotAllocation`        | Integer lot-based allocation using latest prices, configurable lot sizes, and a cash remainder.                   |
 
 ## API
 
 ### Endpoints
 
-| Method | Path        | Description                              |
-| ------ | ----------- | ---------------------------------------- |
-| `GET`  | `/health`   | Health check                             |
-| `GET`  | `/models`   | List all available optimization models   |
-| `POST` | `/optimize` | Run all models and return ranked results |
+| Method | Path        | Description                                              |
+| ------ | ----------- | -------------------------------------------------------- |
+| `GET`  | `/health`   | Health check                                             |
+| `GET`  | `/models`   | List available optimization models                       |
+| `POST` | `/optimize` | Run the model family and return ranked portfolio results |
 
 ### Request: `POST /optimize`
+
+Example request:
 
 ```json
 {
@@ -33,62 +59,119 @@ The system implements six portfolio optimization techniques based on the [Gurobi
   "risk_tolerance": "medium",
   "investment_horizon": "long",
   "tickers": ["AAPL", "MSFT", "GOOGL", "SPY", "IEF"],
-  "risk_free_rate": 0.04
+  "risk_free_rate": 0.04,
+  "return_estimator": "shrunk_mean",
+  "covariance_estimator": "diagonal_shrinkage",
+  "mean_shrinkage": 0.25,
+  "covariance_shrinkage": 0.2,
+  "current_weights": {
+    "AAPL": 0.2,
+    "MSFT": 0.2,
+    "GOOGL": 0.2,
+    "SPY": 0.2,
+    "IEF": 0.2
+  },
+  "transaction_cost_rate": 0.001,
+  "market_impact_coefficient": 0.025,
+  "max_positions": 4,
+  "min_position_weight": 0.05,
+  "sector_max_weights": { "technology": 0.5, "financials": 0.3 },
+  "factor_exposures": {
+    "AAPL": { "market": 1.1, "quality": 0.2 },
+    "MSFT": { "market": 1.0, "quality": 0.25 },
+    "GOOGL": { "market": 1.05, "quality": 0.1 },
+    "SPY": { "market": 1.0, "quality": 0.0 },
+    "IEF": { "market": 0.3, "quality": 0.15 }
+  },
+  "factor_covariance": {
+    "market": { "market": 0.04, "quality": 0.01 },
+    "quality": { "market": 0.01, "quality": 0.03 }
+  },
+  "specific_risk": {
+    "AAPL": 0.02,
+    "MSFT": 0.02,
+    "GOOGL": 0.025,
+    "SPY": 0.01,
+    "IEF": 0.015
+  },
+  "lot_sizes": { "AAPL": 5, "MSFT": 10, "GOOGL": 5, "SPY": 1, "IEF": 1 }
 }
 ```
 
-**Field descriptions:**
+Key request fields:
 
-- `total_amount` _(required)_: Total investment in dollars (must be > 0).
-- `risk_tolerance` _(required)_: Either a float `0–10` or one of `"low"` (→2), `"medium"` (→5), `"high"` (→8).
-- `investment_horizon` _(required)_: Number of months as an integer, or `"short"` (→6 months), `"medium"` (→24 months), `"long"` (→60 months).
-- `tickers` _(optional)_: List of ticker symbols. Defaults to a diversified set of 15 assets (US stocks, ETFs, bonds, gold).
-- `risk_free_rate` _(optional)_: Annual risk-free rate for Sharpe ratio calculation. Defaults to `0.04` (4%).
+- `total_amount`: total investment amount in dollars.
+- `risk_tolerance`: either a float in the range `0` to `10` or one of `low`, `medium`, `high`.
+- `investment_horizon`: either a month count or one of `short`, `medium`, `long`.
+- `tickers`: optional custom ticker list.
+- `risk_free_rate`: annual risk-free rate used in performance metrics.
+- `return_estimator`: return estimator, currently `sample` or `shrunk_mean`.
+- `covariance_estimator`: covariance estimator, currently `sample` or `diagonal_shrinkage`.
+- `mean_shrinkage`: shrinkage intensity for `shrunk_mean`.
+- `covariance_shrinkage`: shrinkage intensity for `diagonal_shrinkage`.
+- `max_gross_exposure`: gross leverage cap for long-short portfolios.
+- `max_short_exposure`: per-asset short exposure cap.
+- `max_cash_borrow`: borrowing allowance for cash-sleeve leverage.
+- `max_turnover`: turnover cap for rebalance-aware models.
+- `current_weights`: current portfolio weights used by turnover-aware and transaction-cost-aware rebalancing.
+- `transaction_cost_rate`: one-way proportional trading-cost assumption.
+- `market_impact_coefficient`: linear ADV-scaled market-impact penalty coefficient.
+- `max_positions`: maximum number of open positions for cardinality-constrained runs.
+- `min_position_weight`: minimum portfolio weight for newly opened positions.
+- `sector_max_weights`: optional sector caps keyed by normalized sector names.
+- `factor_exposures`: optional per-ticker factor exposures used by the factor model variants.
+- `factor_covariance`: optional factor covariance matrix keyed by factor name.
+- `specific_risk`: optional annualized specific variance keyed by ticker for explicit factor models.
+- `lot_sizes`: optional minimum tradable unit keyed by ticker for round-lot allocation.
 
 ### Response
 
-```json
-{
-  "total_amount": 100000.0,
-  "risk_tolerance_normalized": 5.0,
-  "investment_horizon_months": 60,
-  "portfolios": [
-    {
-      "rank": 1,
-      "model_name": "MaxSharpeRatio",
-      "model_description": "Maximizes risk-adjusted return (Sharpe ratio). Best for balanced risk/return.",
-      "weights": {"AAPL": 0.15, "MSFT": 0.22, "SPY": 0.35, ...},
-      "expected_annual_return": 0.112,
-      "expected_annual_risk": 0.148,
-      "sharpe_ratio": 0.486,
-      "allocation": {"AAPL": 15000.0, "MSFT": 22000.0, "SPY": 35000.0, ...},
-      "applicability_score": 100.0,
-      "reasoning": "Optimizes risk-adjusted returns (Sharpe ratio) - versatile approach for medium risk tolerance (5.0/10) and 60-month horizon."
-    },
-    ...
-  ],
-  "data_period_used": "756 trading days",
-  "optimization_status": "success"
-}
-```
+The optimize endpoint returns:
 
-## Ranking Logic
+- normalized risk tolerance and investment horizon
+- ranked portfolio results
+- efficient-frontier points
+- the market-data period used
+- an optimization status string
 
-Models are ranked by an **applicability score** (0–100) computed from:
+Each portfolio result includes:
 
-1. **Risk category** (low/medium/high based on `risk_tolerance`):
-   - Low (0–3): MinimumVariance → EqualWeight → RiskParity → MeanVariance → MaxSharpeRatio → MaximumReturn
-   - Medium (4–6): MaxSharpeRatio → MeanVariance → RiskParity → MinimumVariance → EqualWeight → MaximumReturn
-   - High (7–10): MaximumReturn → MaxSharpeRatio → MeanVariance → RiskParity → EqualWeight → MinimumVariance
+- `model_name`
+- `weights`
+- `expected_annual_return`
+- `expected_annual_risk`
+- `sharpe_ratio`
+- `allocation`
+- `applicability_score`
+- `reasoning`
 
-2. **Horizon adjustment**: Short horizons boost conservative models; long horizons boost aggressive models.
+Some models also include internal fields such as `cash_weight`, `trade_cost`, `open_positions`, or `shares` during optimization, but the API response currently normalizes results through the standard response schema.
+
+## Ranking
+
+Portfolios are ranked by an applicability score that combines:
+
+- heuristic ordering by risk tolerance and investment horizon
+- realized expected return
+- realized expected risk
+- realized Sharpe ratio
+- efficient-frontier context
+
+The ranking layer is output-aware rather than relying only on static model labels.
 
 ## Market Data
 
-- **Primary**: Historical price data fetched from FMP using an API key stored in Azure Key Vault.
-- **Authentication**: The application reads the FMP API key from Azure Key Vault via `DefaultAzureCredential`, which works with local `az login` sessions.
-- **Missing key behavior**: If the FMP API key cannot be retrieved from Azure Key Vault, the request fails loudly instead of falling back to synthetic data.
-- **Fallback**: Synthetic data is only used for non-authentication FMP fetch failures.
+Primary data behavior:
+
+- historical prices are fetched from Financial Modeling Prep
+- the FMP API key is retrieved from Azure Key Vault using `DefaultAzureCredential`
+- missing FMP credentials fail loudly
+- synthetic data is only used for non-authentication FMP fetch failures
+
+Additional first-pass provider support:
+
+- sector and company metadata via FMP profile endpoints
+- average daily dollar volume derived from historical price and volume data
 
 Environment variables:
 
@@ -96,7 +179,24 @@ Environment variables:
 - `FMP_API_SECRET_NAME` default: `fmpapi`
 - `FMP_BASE_URL` default: `https://financialmodelingprep.com/api/v3`
 
-Default tickers: `AAPL, MSFT, GOOGL, AMZN, META, TSLA, JPM, JNJ, PG, KO, SPY, QQQ, IEF, GLD, VNQ`
+Default tickers:
+
+`AAPL, MSFT, GOOGL, AMZN, META, TSLA, JPM, JNJ, PG, KO, SPY, QQQ, IEF, GLD, VNQ`
+
+## Remaining Work For Broader Gurobi Notebook Parity
+
+The repository has first-pass implementations for the major advanced portfolio families, but it is not yet at full broader parity with the Gurobi notebook family.
+
+Main remaining gaps:
+
+- richer factor-model infrastructure beyond the current explicit-contract or market-factor proxy paths
+- broader sector and metadata normalization, especially ETF treatment and richer taxonomy handling
+- richer lot-size semantics beyond the current request-driven lot size assumptions
+- deeper transaction-cost calibration, including fixed-fee or broker-specific variants
+- more rigorous market-impact modeling and calibration
+- cleaner provider abstraction and deeper estimator families beyond the current sample and shrinkage options
+
+In other words: the major categories now exist, but some of them are still simplified first-pass implementations rather than complete notebook-family parity.
 
 ## Installation
 
@@ -104,32 +204,36 @@ Default tickers: `AAPL, MSFT, GOOGL, AMZN, META, TSLA, JPM, JNJ, PG, KO, SPY, QQ
 uv sync
 ```
 
-## Running the Server
+## Running The Server
 
 ```bash
 uv run uvicorn app.main:app --reload
 ```
 
-The API will be available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+Interactive API docs are available at `http://localhost:8000/docs`.
 
 ## Running Tests
 
 ```bash
-uv run pytest tests/ -v
+uv run pytest tests -q
 ```
 
 ## Project Structure
 
-```
+```text
 app/
-├── main.py               # FastAPI application
-├── models/
-│   └── schemas.py        # Pydantic request/response schemas
-└── services/
-  ├── data_service.py   # Market data fetching (FMP + Azure Key Vault + synthetic fallback)
-    ├── optimization.py   # SCIP-based portfolio optimization models
-    └── ranking.py        # Applicability scoring and ranking
+  main.py
+  models/
+    schemas.py
+  services/
+    data_service.py
+    estimation.py
+    optimization.py
+    ranking.py
 tests/
-├── test_optimization.py  # Unit tests for each optimization model
-└── test_api.py           # Integration tests for the API endpoints
+  test_api.py
+  test_data_service.py
+  test_estimation.py
+  test_optimization.py
+  test_ranking.py
 ```
