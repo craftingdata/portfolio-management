@@ -1,0 +1,464 @@
+name: prod-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployParamsFile:
+        description: "Path to .bicepparam file"
+        required: true
+        default: "infra/bicep/sub/params/prod.bicepparam"
+      resourceGroup:
+        description: "Optional target resource group. If provided, overrides config/azure.prod.json.resourceGroup"
+        required: false
+        default: ""
+      envInstance:
+        description: "Optional reset token (use short alphanumeric, e.g. abc123). When set, derived resource names change (KV/ACR/ACA/etc.), avoiding Key Vault purge on recreate."
+        required: false
+        default: ""
+      envSlug:
+        description: "Optional envSlug to pass to the Bicep template when not using a params file"
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_REPO_NAME: shire
+      AZURE_CONFIG_FILE: config/azure.prod.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read Azure config
+        id: azurecfg
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "${AZURE_CONFIG_FILE}" ]; then
+            echo "Missing ${AZURE_CONFIG_FILE}. Add it to the repo (non-secret) or update the workflow to source Azure IDs differently." >&2
+            exit 1
+          fi
+
+          json_get() {
+            python3 -c 'import json,sys; print(json.load(open(sys.argv[1], "r", encoding="utf-8"))[sys.argv[2]])' "$1" "$2"
+          }
+
+          # Enforce RG naming convention: claw-<slug>
+          PARAMS_FILE="${{ github.event.inputs.deployParamsFile }}"
+          ENVSLUG_FROM_FILE=""
+          if [ -n "${PARAMS_FILE}" ] && [ -f "${PARAMS_FILE}" ]; then
+            ENVSLUG_FROM_FILE="$(python3 -c 'import re, sys; txt=open(sys.argv[1], "r", encoding="utf-8").read(); m=re.search(r"^\s*param\s+envSlug\s*=\s*[\'\"]([^\'\"]+)[\'\"]\s*$", txt, re.MULTILINE); print(m.group(1) if m else "")' "${PARAMS_FILE}")"
+          fi
+
+          ENVSLUG_INPUT="${{ github.event.inputs.envSlug }}"
+          ENVSLUG="${ENVSLUG_FROM_FILE}"
+          if [ -z "${ENVSLUG}" ] && [ -n "${ENVSLUG_INPUT}" ]; then
+            ENVSLUG="${ENVSLUG_INPUT}"
+          fi
+          if [ -z "${ENVSLUG}" ]; then
+            ENVSLUG="sam"
+          fi
+
+          EXPECTED_RG="claw-${ENVSLUG}"
+
+          RESOURCE_GROUP_FROM_FILE="$(json_get "${AZURE_CONFIG_FILE}" resourceGroup)"
+          RESOURCE_GROUP_INPUT="${{ github.event.inputs.resourceGroup }}"
+
+          if [ -n "${RESOURCE_GROUP_INPUT}" ]; then
+            if [ "${RESOURCE_GROUP_INPUT}" != "${EXPECTED_RG}" ]; then
+              echo "resourceGroup input must be '${EXPECTED_RG}' (got '${RESOURCE_GROUP_INPUT}')" >&2
+              exit 1
+            fi
+            echo "Using input resourceGroup: ${RESOURCE_GROUP_INPUT}"
+            echo "RESOURCE_GROUP=${RESOURCE_GROUP_INPUT}" >> "$GITHUB_ENV"
+          else
+            if [ -z "${RESOURCE_GROUP_FROM_FILE}" ]; then
+              echo "${AZURE_CONFIG_FILE} missing resourceGroup" >&2
+              exit 1
+            fi
+            if [ "${RESOURCE_GROUP_FROM_FILE}" != "${EXPECTED_RG}" ]; then
+              echo "${AZURE_CONFIG_FILE}.resourceGroup must be '${EXPECTED_RG}' (got '${RESOURCE_GROUP_FROM_FILE}')" >&2
+              exit 1
+            fi
+            echo "RESOURCE_GROUP=${RESOURCE_GROUP_FROM_FILE}" >> "$GITHUB_ENV"
+          fi
+
+          echo "ENVSLUG=${ENVSLUG}" >> "$GITHUB_ENV"
+
+          {
+            echo "client_id=$(json_get "${AZURE_CONFIG_FILE}" clientId)"
+            echo "tenant_id=$(json_get "${AZURE_CONFIG_FILE}" tenantId)"
+            echo "subscription_id=$(json_get "${AZURE_CONFIG_FILE}" subscriptionId)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ steps.azurecfg.outputs.client_id }}
+          tenant-id: ${{ steps.azurecfg.outputs.tenant_id }}
+          subscription-id: ${{ steps.azurecfg.outputs.subscription_id }}
+
+      - name: Set up Docker Buildx (BuildKit)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Deploy IaC (Bicep subscription-scope wrapper)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PARAMS_FILE="${{ github.event.inputs.deployParamsFile }}"
+          echo "Using params file: ${PARAMS_FILE}"
+
+          DEFAULT_LOCATION="eastus2"
+          LOCATION="${DEFAULT_LOCATION}"
+
+          # Best-effort: derive location from the .bicepparam file (if present)
+          # Expected line: param location = 'eastus2'
+          if [ -n "${PARAMS_FILE}" ] && [ -f "${PARAMS_FILE}" ]; then
+            LOCATION_FROM_FILE="$(python3 -c 'import re, sys; txt=open(sys.argv[1], "r", encoding="utf-8").read(); m=re.search(r"^\s*param\s+location\s*=\s*[\'\"]([^\'\"]+)[\'\"]\s*$", txt, re.MULTILINE); print(m.group(1) if m else "")' "${PARAMS_FILE}")"
+            if [ -n "${LOCATION_FROM_FILE}" ]; then
+              LOCATION="${LOCATION_FROM_FILE}"
+            fi
+          fi
+
+          # Passed through to `.bicepparam` via readEnvironmentVariable('SHIRE_ENV_INSTANCE', ...).
+          export SHIRE_ENV_INSTANCE="${{ github.event.inputs.envInstance }}"
+          if [ -n "${SHIRE_ENV_INSTANCE}" ]; then
+            echo "Using envInstance: ${SHIRE_ENV_INSTANCE}"
+          fi
+
+          if [ -n "${PARAMS_FILE}" ] && [ -f "${PARAMS_FILE}" ]; then
+            az deployment sub create \
+              --location "${LOCATION}" \
+              --template-file "infra/bicep/sub/main.bicep" \
+              --parameters "${PARAMS_FILE}" \
+              --query properties.outputs \
+              -o json > deployment.outputs.json
+          else
+            # No params file: pass envSlug and envInstance inline
+            ENVSLUG="${{ github.event.inputs.envSlug }}"
+            az deployment sub create \
+              --location "${LOCATION}" \
+              --template-file "infra/bicep/sub/main.bicep" \
+              --parameters envSlug="${ENVSLUG}" envInstance="${{ github.event.inputs.envInstance }}" tenantId="${{ steps.azurecfg.outputs.tenant_id }}" \
+              --query properties.outputs \
+              -o json > deployment.outputs.json
+          fi
+
+      - name: Read IaC outputs
+        id: outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "resource_group=$(python3 -c 'import json; o=json.load(open("deployment.outputs.json")); print(o["resourceGroupName"]["value"])')"
+            echo "acr_name=$(python3 -c 'import json; o=json.load(open("deployment.outputs.json")); print(o["acrName"]["value"])')"
+            echo "acr_login_server=$(python3 -c 'import json; o=json.load(open("deployment.outputs.json")); print(o["acrLoginServer"]["value"])')"
+            echo "container_app_name=$(python3 -c 'import json; o=json.load(open("deployment.outputs.json")); print(o["containerAppName"]["value"])')"
+            echo "keyvault_uri=$(python3 -c 'import json; o=json.load(open("deployment.outputs.json")); print(o["keyVaultUri"]["value"])')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create gateway token in Key Vault (if missing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          KV_URI="${{ steps.outputs.outputs.keyvault_uri }}"
+          if [ -z "${KV_URI}" ]; then
+            echo "No key vault URI available; skipping token creation"
+            exit 0
+          fi
+          VAULT_NAME="$(python3 -c 'import sys; u=sys.argv[1].rstrip("/"); print(u.split("//")[-1].split(".")[0])' "${KV_URI}")"
+
+          if az keyvault secret show --vault-name "${VAULT_NAME}" --name openclaw-gateway-token --query id -o tsv >/dev/null 2>&1; then
+            echo "openclaw-gateway-token already exists in ${VAULT_NAME}; skipping"
+            exit 0
+          fi
+
+          echo "Creating gateway token in Key Vault ${VAULT_NAME}"
+          ./scripts/create-gateway-token.sh "${VAULT_NAME}" "openclaw-gateway-token"
+
+      - name: Build + push pinned OpenClaw image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Reading OpenClaw pin..."
+          OPENCLAW_REPO="$(python3 -c "import json; print(json.load(open('OPENCLAW_PIN.json','r',encoding='utf-8'))['openclawRepo'])")"
+          OPENCLAW_SHA="$(python3 -c "import json; print(json.load(open('OPENCLAW_PIN.json','r',encoding='utf-8'))['openclawCommit'])")"
+          OPENCLAW_VALIDATE_REF="$(python3 -c "import json; print(json.load(open('OPENCLAW_PIN.json','r',encoding='utf-8')).get('validatedBy',{}).get('upstreamRef',''))")"
+
+          if [ -n "${OPENCLAW_VALIDATE_REF}" ]; then
+            echo "Validating OpenClaw pin: ${OPENCLAW_VALIDATE_REF} -> ${OPENCLAW_SHA}"
+            LSREMOTE="$(git ls-remote "${OPENCLAW_REPO}" "${OPENCLAW_VALIDATE_REF}" || true)"
+            if [ -z "${LSREMOTE}" ]; then
+              echo "Validation ref not found on repo: ${OPENCLAW_VALIDATE_REF}" >&2
+              exit 1
+            fi
+
+            # Handle both lightweight tags and annotated tags.
+            # Annotated tags will include a '^{}' dereference line pointing at the commit.
+            RESOLVED_SHA="$(echo "${LSREMOTE}" | awk '/\\^\\{\\}$/{print $1; found=1} END{if(!found){print $1}}' | head -n1)"
+            if [ -z "${RESOLVED_SHA}" ]; then
+              echo "Unable to resolve validation ref to a commit" >&2
+              echo "ls-remote output:" >&2
+              echo "${LSREMOTE}" >&2
+              exit 1
+            fi
+
+            if [ "${RESOLVED_SHA}" != "${OPENCLAW_SHA}" ]; then
+              echo "Pinned SHA mismatch." >&2
+              echo "Expected (from OPENCLAW_PIN.json): ${OPENCLAW_SHA}" >&2
+              echo "Resolved (from ${OPENCLAW_VALIDATE_REF}): ${RESOLVED_SHA}" >&2
+              echo "ls-remote output:" >&2
+              echo "${LSREMOTE}" >&2
+              exit 1
+            fi
+            echo "Pin validated."
+          else
+            echo "No validatedBy.upstreamRef set; skipping pin validation."
+          fi
+
+          if [ -z "${OPENCLAW_SHA}" ]; then
+            echo "OPENCLAW_PIN.json missing openclawCommit" >&2
+            exit 1
+          fi
+
+          ACR_NAME="${{ steps.outputs.outputs.acr_name }}"
+          ACR_LOGIN_SERVER="${{ steps.outputs.outputs.acr_login_server }}"
+
+          echo "Logging into ACR ${ACR_NAME}..."
+          az acr login -n "${ACR_NAME}"
+
+          WORK_DIR="${RUNNER_TEMP}/openclaw-src"
+          OUT_ENV="${RUNNER_TEMP}/openclaw-image.env"
+
+          bash ./scripts/docker-buildkit-acr-cached.sh \
+            --acr-name "${ACR_NAME}" \
+            --acr-login-server "${ACR_LOGIN_SERVER}" \
+            --repo-name "${IMAGE_REPO_NAME}" \
+            --openclaw-repo "${OPENCLAW_REPO}" \
+            --openclaw-sha "${OPENCLAW_SHA}" \
+            --run-number "${GITHUB_RUN_NUMBER}" \
+            --work-dir "${WORK_DIR}" \
+            --out-env "${OUT_ENV}"
+
+          # shellcheck disable=SC1090
+          source "${OUT_ENV}"
+          echo "Using image tag: ${IMAGE_TAG_USED} (build skipped: ${BUILD_SKIPPED})"
+          echo "Image ref (digest): ${IMAGE_REF}"
+
+          cd "$GITHUB_WORKSPACE"
+          python3 -c 'import json, os, datetime; f="OPENCLAW_PIN.json"; pin=json.load(open(f,"r",encoding="utf-8")); pin["image"]=os.environ["IMAGE_REF"]; pin["imageDigest"]=os.environ["DIGEST"]; pin["builtAt"]=datetime.datetime.now(datetime.timezone.utc).isoformat(); json.dump(pin, open(f,"w",encoding="utf-8"), indent=2); open(f,"a",encoding="utf-8").write("\\n")'
+
+          echo "IMAGE_REF=${IMAGE_REF}" >> "$GITHUB_ENV"
+          echo "DIGEST=${DIGEST}" >> "$GITHUB_ENV"
+
+      - name: Upload build artifacts (pin + deployment outputs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-deploy-artifacts
+          path: |
+            OPENCLAW_PIN.json
+            deployment.outputs.json
+
+      - name: Detect optional Key Vault-backed secret refs
+        id: kvflags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KV_URI="${{ steps.outputs.outputs.keyvault_uri }}"
+
+          if [ -z "${KV_URI}" ]; then
+            echo "Missing key vault uri output" >&2
+            exit 1
+          fi
+
+          VAULT_NAME="$(python3 -c 'import sys; u=sys.argv[1].rstrip("/"); print(u.split("//")[-1].split(".")[0])' "${KV_URI}")"
+
+          has_secret() {
+            local secret_name="$1"
+            az keyvault secret show --vault-name "${VAULT_NAME}" --name "${secret_name}" --query id -o tsv >/dev/null 2>&1
+          }
+
+          if ! has_secret openclaw-gateway-token; then
+            echo "Missing required Key Vault secret: openclaw-gateway-token (exposed as OPENCLAW_GATEWAY_TOKEN)" >&2
+            echo "Create it in Key Vault (${KV_URI}) and re-run this workflow." >&2
+            exit 1
+          fi
+
+          foundry_configured=false
+          telegram_configured=false
+          teams_configured=false
+
+          if has_secret foundry-openai-api-key; then
+            foundry_configured=true
+          fi
+          if has_secret telegram-bot-token; then
+            telegram_configured=true
+          fi
+          if has_secret msteams-app-id && has_secret msteams-app-password && has_secret msteams-tenant-id; then
+            teams_configured=true
+          fi
+
+          echo "foundry_api_key_configured=${foundry_configured}" >> "$GITHUB_OUTPUT"
+          echo "telegram_secrets_configured=${telegram_configured}" >> "$GITHUB_OUTPUT"
+          echo "teams_secrets_configured=${teams_configured}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy OpenClaw mode through Bicep
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PARAMS_FILE="${{ github.event.inputs.deployParamsFile }}"
+          DEFAULT_LOCATION="eastus2"
+          LOCATION="${DEFAULT_LOCATION}"
+
+          if [ -n "${PARAMS_FILE}" ] && [ -f "${PARAMS_FILE}" ]; then
+            LOCATION_FROM_FILE="$(python3 -c 'import re, sys; txt=open(sys.argv[1], "r", encoding="utf-8").read(); m=re.search(r"^\s*param\s+location\s*=\s*[\'\"]([^\'\"]+)[\'\"]\s*$", txt, re.MULTILINE); print(m.group(1) if m else "")' "${PARAMS_FILE}")"
+            if [ -n "${LOCATION_FROM_FILE}" ]; then
+              LOCATION="${LOCATION_FROM_FILE}"
+            fi
+          fi
+
+          export SHIRE_ENV_INSTANCE="${{ github.event.inputs.envInstance }}"
+          if [ -n "${SHIRE_ENV_INSTANCE}" ]; then
+            echo "Using envInstance: ${SHIRE_ENV_INSTANCE}"
+          fi
+
+          if [ -n "${PARAMS_FILE}" ] && [ -f "${PARAMS_FILE}" ]; then
+            az deployment sub create \
+              --location "${LOCATION}" \
+              --template-file "infra/bicep/sub/main.bicep" \
+              --parameters "${PARAMS_FILE}" \
+              --parameters containerImage="${IMAGE_REF}" \
+              --parameters openclawMode=true \
+              --parameters foundryApiKeyConfigured=${{ steps.kvflags.outputs.foundry_api_key_configured }} \
+              --parameters telegramSecretsConfigured=${{ steps.kvflags.outputs.telegram_secrets_configured }} \
+              --parameters teamsSecretsConfigured=${{ steps.kvflags.outputs.teams_secrets_configured }} \
+              --query properties.outputs \
+              -o json > deployment.outputs.json
+          else
+            ENVSLUG="${{ github.event.inputs.envSlug }}"
+            az deployment sub create \
+              --location "${LOCATION}" \
+              --template-file "infra/bicep/sub/main.bicep" \
+              --parameters envSlug="${ENVSLUG}" envInstance="${{ github.event.inputs.envInstance }}" tenantId="${{ steps.azurecfg.outputs.tenant_id }}" \
+              --parameters containerImage="${IMAGE_REF}" \
+              --parameters openclawMode=true \
+              --parameters foundryApiKeyConfigured=${{ steps.kvflags.outputs.foundry_api_key_configured }} \
+              --parameters telegramSecretsConfigured=${{ steps.kvflags.outputs.telegram_secrets_configured }} \
+              --parameters teamsSecretsConfigured=${{ steps.kvflags.outputs.teams_secrets_configured }} \
+              --query properties.outputs \
+              -o json > deployment.outputs.json
+          fi
+
+      - name: Validate deployed ACA secret refs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ steps.outputs.outputs.container_app_name }}"
+          RESOURCE_GROUP="${{ steps.outputs.outputs.resource_group }}"
+          KV_URI="${{ steps.outputs.outputs.keyvault_uri }}"
+          if [ -z "${APP_NAME}" ] || [ -z "${RESOURCE_GROUP}" ] || [ -z "${KV_URI}" ]; then
+            echo "Missing deployment outputs required for secret-ref validation" >&2
+            exit 1
+          fi
+
+          expect_secret() {
+            local aca_secret_name="$1"
+            local kv_secret_name="$2"
+            local env_name="$3"
+            local expected_kv_url="${KV_URI%/}/secrets/${kv_secret_name}"
+            local actual_kv_url
+            local actual_secret_ref
+
+            actual_kv_url="$(az containerapp show --name "${APP_NAME}" --resource-group "${RESOURCE_GROUP}" --query "properties.configuration.secrets[?name=='${aca_secret_name}'] | [0].keyVaultUrl" -o tsv)"
+            if [ -z "${actual_kv_url}" ]; then
+              echo "Missing ACA secret ${aca_secret_name}" >&2
+              exit 1
+            fi
+            if [ "${actual_kv_url}" != "${expected_kv_url}" ]; then
+              echo "ACA secret ${aca_secret_name} keyVaultUrl mismatch: ${actual_kv_url} != ${expected_kv_url}" >&2
+              exit 1
+            fi
+
+            actual_secret_ref="$(az containerapp show --name "${APP_NAME}" --resource-group "${RESOURCE_GROUP}" --query "properties.template.containers[?name=='app'] | [0].env[?name=='${env_name}'] | [0].secretRef" -o tsv)"
+            if [ -z "${actual_secret_ref}" ]; then
+              echo "Missing env var ${env_name}" >&2
+              exit 1
+            fi
+            if [ "${actual_secret_ref}" != "${aca_secret_name}" ]; then
+              echo "Env var ${env_name} secretRef mismatch: ${actual_secret_ref} != ${aca_secret_name}" >&2
+              exit 1
+            fi
+          }
+
+          expect_secret openclaw-gateway-token openclaw-gateway-token OPENCLAW_GATEWAY_TOKEN
+
+          if [ "${{ steps.kvflags.outputs.foundry_api_key_configured }}" = "true" ]; then
+            expect_secret openai-api-key foundry-openai-api-key OPENAI_API_KEY
+          fi
+          if [ "${{ steps.kvflags.outputs.telegram_secrets_configured }}" = "true" ]; then
+            expect_secret telegram-bot-token telegram-bot-token TELEGRAM_BOT_TOKEN
+          fi
+          if [ "${{ steps.kvflags.outputs.teams_secrets_configured }}" = "true" ]; then
+            expect_secret msteams-app-id msteams-app-id MSTEAMS_APP_ID
+            expect_secret msteams-app-password msteams-app-password MSTEAMS_APP_PASSWORD
+            expect_secret msteams-tenant-id msteams-tenant-id MSTEAMS_TENANT_ID
+          fi
+
+          echo "ACA secret refs validated."
+
+      - name: Validate OpenClaw config JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ steps.outputs.outputs.container_app_name }}"
+          RESOURCE_GROUP="${{ steps.outputs.outputs.resource_group }}"
+
+          if [ -z "${APP_NAME}" ] || [ -z "${RESOURCE_GROUP}" ]; then
+            echo "Missing deployment outputs required for config validation" >&2
+            exit 1
+          fi
+
+          exec_output="$(az containerapp exec -g "${RESOURCE_GROUP}" -n "${APP_NAME}" --command "sh -c 'openclaw config validate --json'" 2>&1)"
+          status=$?
+          printf '%s\n' "${exec_output}"
+          if [ ${status} -ne 0 ]; then
+            echo "openclaw config validate --json failed" >&2
+            exit ${status}
+          fi
+
+      - name: Run OpenClaw deep security audit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ steps.outputs.outputs.container_app_name }}"
+          RESOURCE_GROUP="${{ steps.outputs.outputs.resource_group }}"
+
+          if [ -z "${APP_NAME}" ] || [ -z "${RESOURCE_GROUP}" ]; then
+            echo "Missing deployment outputs required for security audit" >&2
+            exit 1
+          fi
+
+          audit_output="$(az containerapp exec -g "${RESOURCE_GROUP}" -n "${APP_NAME}" --command "openclaw security audit --deep" 2>&1)"
+          status=$?
+          printf '%s\n' "${audit_output}"
+          if [ ${status} -ne 0 ]; then
+            echo "openclaw security audit --deep failed" >&2
+            exit ${status}
+          fi

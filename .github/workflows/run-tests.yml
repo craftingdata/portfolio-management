@@ -1,0 +1,28 @@
+name: Run tests
+
+on:
+  push: {}
+  pull_request: {}
+
+jobs:
+  tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dev dependencies with uv
+        run: |
+          uv sync --dev
+
+      - name: Run tests with uv
+        run: |
+          uv run pytest -q
