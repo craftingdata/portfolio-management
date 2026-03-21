@@ -33,9 +33,9 @@ The API currently exposes 16 model families through `GET /models` and returns th
 
 | Model                       | Description                                                                                                       |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `FactorUtilityMaximization` | Utility maximization using either an explicit factor contract or a market-factor-implied covariance matrix.       |
-| `FactorVarianceConstraint`  | Mean-variance optimization using either an explicit factor contract or a market-factor-implied covariance matrix. |
-| `SectorAllocation`          | Mean-variance optimization with sector concentration caps.                                                        |
+| `FactorUtilityMaximization` | Utility maximization using either an explicit factor contract or an inferred multi-factor covariance model.       |
+| `FactorVarianceConstraint`  | Mean-variance optimization using either an explicit factor contract or an inferred multi-factor covariance model. |
+| `SectorAllocation`          | Mean-variance optimization with sector concentration caps on non-ETF assets with stable sector metadata.          |
 | `CardinalityMinBuyIn`       | Mean-variance optimization with a maximum holdings count and minimum buy-in weights.                              |
 | `RoundLotAllocation`        | Integer lot-based allocation using latest prices, configurable lot sizes, and a cash remainder.                   |
 
@@ -122,7 +122,7 @@ Key request fields:
 - `impact_adv_floor`: minimum ADV used when scaling market-impact penalties.
 - `max_positions`: maximum number of open positions for cardinality-constrained runs.
 - `min_position_weight`: minimum portfolio weight for newly opened positions.
-- `sector_max_weights`: optional sector caps keyed by normalized sector names.
+- `sector_max_weights`: optional sector caps keyed by normalized sector names; ETFs and assets without stable sector classification are excluded from this model.
 - `factor_exposures`: optional per-ticker factor exposures used by the factor model variants.
 - `factor_covariance`: optional factor covariance matrix keyed by factor name.
 - `specific_risk`: optional annualized specific variance keyed by ticker for explicit factor models.
@@ -178,6 +178,12 @@ Additional first-pass provider support:
 - sector and company metadata via FMP profile endpoints
 - average daily dollar volume derived from historical price and volume data
 
+Metadata and factor normalization behavior:
+
+- inferred factor models now combine a market factor with additional statistical residual factors derived from aligned return history
+- sector-constrained runs normalize common sector aliases, infer sectors from industry when possible, and exclude ETFs from sector caps
+- assets with missing or unstable sector labels are dropped from the sector-constrained subproblem instead of aborting the full request
+
 Execution-cost defaults:
 
 - default transaction-cost model: `interactive_brokers_fixed`
@@ -201,8 +207,6 @@ The repository has first-pass implementations for the major advanced portfolio f
 
 Main remaining gaps:
 
-- richer factor-model infrastructure beyond the current explicit-contract or market-factor proxy paths
-- broader sector and metadata normalization, especially ETF treatment and richer taxonomy handling
 - richer lot-size semantics beyond the current request-driven lot size assumptions
 - deeper transaction-cost calibration beyond the current broker-calibrated default plus per-asset overrides, especially fixed-fee schedules
 - more rigorous market-impact modeling beyond the current linear ADV-based formulation

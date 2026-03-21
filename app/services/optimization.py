@@ -10,6 +10,21 @@ DEFAULT_TRANSACTION_COST_MODEL = "interactive_brokers_fixed"
 DEFAULT_TRANSACTION_COST_RATE = 0.001
 DEFAULT_MARKET_IMPACT_COEFFICIENT = 0.025
 DEFAULT_IMPACT_ADV_FLOOR = 5_000_000.0
+SECTOR_ALIAS_MAP = {
+    "basic_materials": "materials",
+    "communication": "communication_services",
+    "communications": "communication_services",
+    "communications_services": "communication_services",
+    "consumer_cyclical": "consumer_discretionary",
+    "consumer_defensive": "consumer_staples",
+    "financial_services": "financials",
+    "healthcare": "health_care",
+    "information_technology": "technology",
+    "realestate": "real_estate",
+    "real_estate_services": "real_estate",
+    "telecom": "communication_services",
+    "telecommunication_services": "communication_services",
+}
 
 
 @dataclass
@@ -100,6 +115,95 @@ def _resolve_execution_penalties(
             impact_penalties[index] = market_impact_rates[index] * (float(max(total_amount, 1e-8)) / adv)
 
     return transaction_cost_rates, market_impact_rates, transaction_cost_rates + impact_penalties
+
+
+def _normalized_metadata_token(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    cleaned = []
+    previous_was_separator = False
+    for character in str(value).strip().lower():
+        if character.isalnum():
+            cleaned.append(character)
+            previous_was_separator = False
+        elif not previous_was_separator:
+            cleaned.append("_")
+            previous_was_separator = True
+    return "_".join(part for part in "".join(cleaned).split("_") if part)
+
+
+def _parse_boolish(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def _resolve_sector_from_industry(industry: Optional[str]) -> Optional[str]:
+    normalized = _normalized_metadata_token(industry)
+    if not normalized:
+        return None
+
+    keyword_to_sector = {
+        "aerospace": "industrials",
+        "asset_management": "financials",
+        "bank": "financials",
+        "biotech": "health_care",
+        "capital_markets": "financials",
+        "consumer_electronics": "technology",
+        "drug": "health_care",
+        "insurance": "financials",
+        "internet": "communication_services",
+        "media": "communication_services",
+        "oil": "energy",
+        "pharmaceutical": "health_care",
+        "reit": "real_estate",
+        "semiconductor": "technology",
+        "software": "technology",
+        "telecom": "communication_services",
+    }
+    for keyword, sector in keyword_to_sector.items():
+        if keyword in normalized:
+            return sector
+    return None
+
+
+def _metadata_indicates_etf(metadata: Optional[Dict[str, str]]) -> bool:
+    if not metadata:
+        return False
+
+    if _parse_boolish(metadata.get("isEtf")):
+        return True
+
+    for key in ("assetType", "industry", "companyName", "sector"):
+        normalized = _normalized_metadata_token(metadata.get(key))
+        if normalized in {"etf", "exchange_traded_fund", "exchange_traded_product", "fund"}:
+            return True
+        if "exchange_traded_fund" in normalized:
+            return True
+    return False
+
+
+def _normalized_sector_name(value: Optional[str]) -> str:
+    normalized = _normalized_metadata_token(value)
+    if not normalized or normalized in {"unknown", "none", "null", "n_a", "na", "other", "unclassified"}:
+        return "unknown"
+    return SECTOR_ALIAS_MAP.get(normalized, SECTOR_ALIAS_MAP.get(normalized.replace("_", ""), normalized))
+
+
+def _resolve_sector_bucket(metadata: Optional[Dict[str, str]]) -> Optional[str]:
+    if _metadata_indicates_etf(metadata):
+        return None
+
+    sector = _normalized_sector_name(metadata.get("sector") if metadata else None)
+    if sector not in {"unknown", "etf"}:
+        return sector
+
+    inferred_sector = _resolve_sector_from_industry(metadata.get("industry") if metadata else None)
+    if inferred_sector:
+        return inferred_sector
+    return None
 
 
 def _scipy_min_variance(mu: np.ndarray, sigma: np.ndarray) -> np.ndarray:
@@ -977,36 +1081,55 @@ def run_all_models(
     return results
 
 
-def _build_market_factor_components(returns_df: pd.DataFrame) -> FactorModelData:
+def _build_statistical_factor_components(returns_df: pd.DataFrame) -> FactorModelData:
     returns_df = returns_df.dropna(axis=0, how="any")
     if returns_df.empty or returns_df.shape[1] < 2:
         raise ValueError("Factor model requires at least two aligned return series")
 
-    factor_returns = returns_df.mean(axis=1).astype(float)
-    factor_values = factor_returns.to_numpy(dtype=float)
-    factor_variance = float(max(np.var(factor_values, ddof=1) * 252.0, 1e-10))
-    factor_covariance = np.array([[factor_variance]], dtype=float)
+    asset_returns = returns_df.to_numpy(dtype=float)
+    centered_asset_returns = asset_returns - asset_returns.mean(axis=0, keepdims=True)
 
-    exposures = []
-    specific_variances = []
-    factor_sample_variance = float(max(np.var(factor_values, ddof=1), 1e-10))
+    factor_returns = returns_df.mean(axis=1).astype(float).to_numpy(dtype=float)
+    centered_market_returns = factor_returns - float(factor_returns.mean())
+    market_sample_variance = float(max(np.var(centered_market_returns, ddof=1), 1e-10))
+    market_variance = float(max(market_sample_variance * 252.0, 1e-10))
 
-    for column in returns_df.columns:
-        asset_values = returns_df[column].to_numpy(dtype=float)
-        if len(asset_values) != len(factor_values):
-            raise ValueError("Factor model inputs must be aligned")
-        covariance = float(np.cov(asset_values, factor_values, ddof=1)[0, 1])
-        beta = covariance / factor_sample_variance
-        residuals = asset_values - beta * factor_values
-        exposures.append(beta)
-        specific_variances.append(float(max(np.var(residuals, ddof=1) * 252.0, 1e-10)))
+    market_betas = (centered_asset_returns.T @ centered_market_returns) / max(len(centered_market_returns) - 1, 1)
+    market_betas = market_betas / market_sample_variance
+    residual_returns = centered_asset_returns - np.outer(centered_market_returns, market_betas)
 
-    exposure_matrix = np.array(exposures, dtype=float).reshape(-1, 1)
-    specific_matrix = np.diag(np.array(specific_variances, dtype=float))
-    implied_covariance = exposure_matrix @ factor_covariance @ exposure_matrix.T + specific_matrix
+    residual_covariance_daily = np.cov(residual_returns, rowvar=False, ddof=1)
+    residual_covariance_daily = np.atleast_2d(_ensure_positive_semidefinite(np.array(residual_covariance_daily, dtype=float)))
+    eigenvalues, eigenvectors = np.linalg.eigh(residual_covariance_daily)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+
+    positive_indices = [index for index, value in enumerate(eigenvalues) if value > 1e-8]
+    residual_factor_count = min(2, len(positive_indices))
+
+    exposure_columns = [market_betas.reshape(-1, 1)]
+    factor_variances = [market_variance]
+    factor_names = ["market"]
+
+    if residual_factor_count:
+        residual_exposures = eigenvectors[:, :residual_factor_count]
+        residual_variances = np.maximum(eigenvalues[:residual_factor_count] * 252.0, 1e-10)
+        exposure_columns.append(residual_exposures)
+        factor_variances.extend(residual_variances.tolist())
+        factor_names.extend([f"statistical_{index + 1}" for index in range(residual_factor_count)])
+
+    exposure_matrix = np.column_stack(exposure_columns)
+    factor_covariance = np.diag(np.array(factor_variances, dtype=float))
+
+    common_covariance = exposure_matrix @ factor_covariance @ exposure_matrix.T
+    asset_covariance = returns_df.cov().to_numpy(dtype=float) * 252.0
+    specific_variances = np.maximum(np.diag(asset_covariance - common_covariance), 1e-10)
+    specific_matrix = np.diag(specific_variances)
+    implied_covariance = common_covariance + specific_matrix
     implied_covariance = _ensure_positive_semidefinite(implied_covariance)
     return FactorModelData(
-        factor_names=["market"],
+        factor_names=factor_names,
         exposure_matrix=exposure_matrix,
         factor_covariance=factor_covariance,
         specific_variance=specific_matrix,
@@ -1024,7 +1147,7 @@ def _build_factor_model_from_contract(
     if factor_exposures is None and factor_covariance is None and specific_risk is None:
         if returns_df is None:
             raise ValueError("returns_df is required when explicit factor inputs are not provided")
-        return _build_market_factor_components(returns_df)
+        return _build_statistical_factor_components(returns_df)
 
     if factor_exposures is None or factor_covariance is None or specific_risk is None:
         raise ValueError("factor_exposures, factor_covariance, and specific_risk must be provided together")
@@ -1117,12 +1240,6 @@ def factor_variance_constraint(
     return result
 
 
-def _normalized_sector_name(value: Optional[str]) -> str:
-    if not value:
-        return "Unknown"
-    return str(value).strip().lower().replace("/", "_").replace(" ", "_")
-
-
 def sector_allocation_mean_variance(
     mu: np.ndarray,
     sigma: np.ndarray,
@@ -1138,14 +1255,20 @@ def sector_allocation_mean_variance(
         raise ValueError("Sector limits are required for sector-constrained optimization")
 
     sector_limits = {_normalized_sector_name(sector): float(limit) for sector, limit in sector_max_weights.items()}
-    sector_map = {
-        ticker: _normalized_sector_name(sector_metadata.get(ticker, {}).get("sector"))
-        for ticker in tickers
-    }
+    sector_map = {ticker: _resolve_sector_bucket(sector_metadata.get(ticker, {})) for ticker in tickers}
+    eligible_indices = [index for index, ticker in enumerate(tickers) if sector_map.get(ticker) is not None]
+    excluded_tickers = [ticker for ticker in tickers if sector_map.get(ticker) is None]
 
-    n = len(mu)
-    target_return = float(np.min(mu) + (np.max(mu) - np.min(mu)) * risk_level)
-    weights = None
+    if not eligible_indices:
+        raise ValueError("Sector-constrained optimization requires at least one non-ETF asset with stable sector metadata")
+
+    eligible_mu = np.array(mu[eligible_indices], dtype=float)
+    eligible_sigma = np.array(sigma[np.ix_(eligible_indices, eligible_indices)], dtype=float)
+    eligible_tickers = [tickers[index] for index in eligible_indices]
+
+    n = len(eligible_mu)
+    target_return = float(np.min(eligible_mu) + (np.max(eligible_mu) - np.min(eligible_mu)) * risk_level)
+    eligible_weights = None
 
     try:
         from pyscipopt import Model, quicksum
@@ -1153,18 +1276,18 @@ def sector_allocation_mean_variance(
         model = Model()
         model.hideOutput()
         x = [model.addVar(lb=0.0, ub=1.0, vtype="C", name=f"x_{i}") for i in range(n)]
-        model.setObjective(quicksum(sigma[i, j] * x[i] * x[j] for i in range(n) for j in range(n)), "minimize")
+        model.setObjective(quicksum(eligible_sigma[i, j] * x[i] * x[j] for i in range(n) for j in range(n)), "minimize")
         model.addCons(quicksum(x[i] for i in range(n)) == 1.0)
-        model.addCons(quicksum(mu[i] * x[i] for i in range(n)) >= target_return)
+        model.addCons(quicksum(eligible_mu[i] * x[i] for i in range(n)) >= target_return)
 
         for sector_name, limit in sector_limits.items():
-            sector_indices = [index for index, ticker in enumerate(tickers) if sector_map.get(ticker) == sector_name]
+            sector_indices = [index for index, ticker in enumerate(eligible_tickers) if sector_map.get(ticker) == sector_name]
             if sector_indices:
                 model.addCons(quicksum(x[index] for index in sector_indices) <= limit)
 
         model.optimize()
         if model.getStatus() == "optimal":
-            weights = _normalize_weights([model.getVal(x[i]) for i in range(n)])
+            eligible_weights = _normalize_weights([model.getVal(x[i]) for i in range(n)])
         else:
             raise ValueError(f"SCIP status: {model.getStatus()}")
     except Exception as exc:
@@ -1174,28 +1297,33 @@ def sector_allocation_mean_variance(
         x0 = np.ones(n) / n
         constraints = [
             {"type": "eq", "fun": lambda x: np.sum(x) - 1.0},
-            {"type": "ineq", "fun": lambda x: float(mu @ x) - target_return},
+            {"type": "ineq", "fun": lambda x: float(eligible_mu @ x) - target_return},
         ]
         for sector_name, limit in sector_limits.items():
-            sector_indices = [index for index, ticker in enumerate(tickers) if sector_map.get(ticker) == sector_name]
+            sector_indices = [index for index, ticker in enumerate(eligible_tickers) if sector_map.get(ticker) == sector_name]
             if sector_indices:
                 constraints.append({"type": "ineq", "fun": lambda x, indices=sector_indices, cap=limit: cap - float(np.sum(x[indices]))})
 
         bounds = [(0.0, 1.0)] * n
         result = minimize(
-            lambda x: float(x @ sigma @ x),
+            lambda x: float(x @ eligible_sigma @ x),
             x0,
             method="SLSQP",
             bounds=bounds,
             constraints=constraints,
             options={"ftol": 1e-9, "maxiter": 2000},
         )
-        weights = _normalize_weights(result.x)
+        eligible_weights = _normalize_weights(result.x)
+
+    weights = np.zeros(len(mu), dtype=float)
+    weights[np.array(eligible_indices, dtype=int)] = eligible_weights
 
     expected_return, expected_risk, sharpe_ratio = compute_metrics(weights, mu, sigma, risk_free_rate)
     sector_weights = {}
     for ticker, weight in zip(tickers, weights):
-        sector = sector_map.get(ticker, "unknown")
+        sector = sector_map.get(ticker)
+        if sector is None:
+            continue
         sector_weights[sector] = sector_weights.get(sector, 0.0) + float(weight)
 
     return {
@@ -1205,6 +1333,8 @@ def sector_allocation_mean_variance(
         "expected_risk": expected_risk,
         "sharpe_ratio": sharpe_ratio,
         "sector_weights": sector_weights,
+        "eligible_tickers": eligible_tickers,
+        "excluded_tickers": excluded_tickers,
     }
 
 

@@ -113,6 +113,8 @@ The next model should be aware of these repo-specific realities:
 - `optimization.py` currently exposes one function per strategy plus `run_all_models()`. It now includes utility, leverage, and turnover-aware models, but it is still not split into model-builder abstractions.
 - `ranking.py` now blends heuristic tables with realized optimizer output quality and frontier context.
 - The API request model now exposes leverage, turnover, sector-cap, calibrated transaction-cost and market-impact controls, basic cardinality controls, estimator selection, explicit factor-model inputs, and configurable lot sizes, but the surrounding provider and validation layers are still relatively thin.
+- The inferred factor-model path now builds a richer multi-factor covariance using a market factor plus statistical residual factors from aligned returns, while explicit factor contracts still take precedence.
+- Sector-constrained optimization now normalizes common sector aliases, infers sectors from industry when possible, excludes ETFs, and drops assets with unstable sector metadata from the constrained subproblem.
 - Synthetic fallback still exists in `data_service.py`; it should be treated as test/degradation behavior, not as a preferred production path.
 - FinanceToolkit diagnostics are best-effort. The optimizer should not depend on FinanceToolkit outputs to function.
 
@@ -136,8 +138,6 @@ uv run pytest tests -q
 
 The repo now has first-pass implementations for the major advanced notebook families, but it is still short of broader parity in a few important areas:
 
-- richer factor-model infrastructure beyond the current explicit-contract or market-factor proxy paths
-- broader metadata normalization, ETF handling, and sector/industry semantics
 - richer lot-size semantics beyond the current request-driven lot-size assumptions
 - deeper transaction-cost calibration beyond the current Interactive Brokers-style baseline plus per-asset overrides, especially fixed-fee schedules
 - more rigorous market-impact modeling beyond the current linear ADV-based formulation

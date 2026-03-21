@@ -225,6 +225,13 @@ def test_factor_model_variants(price_frame_data):
 
     assert utility_result["model_name"] == "FactorUtilityMaximization"
     assert constraint_result["model_name"] == "FactorVarianceConstraint"
+    assert utility_result["factor_names"][0] == "market"
+    assert len(utility_result["factor_names"]) >= 2
+    assert utility_result["factor_exposures"].shape[1] == len(utility_result["factor_names"])
+    assert constraint_result["factor_covariance"].shape == (
+        len(constraint_result["factor_names"]),
+        len(constraint_result["factor_names"]),
+    )
     assert_valid_portfolio(utility_result, len(mu))
     assert_valid_portfolio(constraint_result, len(mu))
 
@@ -357,3 +364,30 @@ def test_transaction_cost_rebalancing_supports_per_asset_calibration(price_frame
     assert result["transaction_cost_rates"][0] > result["transaction_cost_rates"][-1]
     assert result["combined_penalty_rates"][0] > result["combined_penalty_rates"][-1]
     assert_valid_portfolio(result, len(mu))
+
+
+def test_sector_allocation_excludes_etfs_and_unclassified_assets(price_frame_data):
+    tickers, prices_df, returns_df, mu, sigma = price_frame_data
+    sector_metadata = {
+        "AAPL": {"sector": "Information Technology", "industry": "Consumer Electronics", "assetType": "Equity", "isEtf": False},
+        "MSFT": {"sector": "Technology", "industry": "Software - Infrastructure", "assetType": "Equity", "isEtf": False},
+        "GOOGL": {"sector": "Communication Services", "industry": "Internet Content & Information", "assetType": "Equity", "isEtf": False},
+        "JPM": {"sector": None, "industry": "Banks - Diversified", "assetType": "Equity", "isEtf": False},
+        "SPY": {"sector": "Financial Services", "industry": "Exchange Traded Fund", "assetType": "ETF", "isEtf": True},
+    }
+
+    result = sector_allocation_mean_variance(
+        mu,
+        sigma,
+        tickers,
+        sector_metadata,
+        {"technology": 0.7, "communication_services": 0.4, "financials": 0.4},
+        risk_level=0.5,
+    )
+
+    assert_valid_portfolio(result, len(mu))
+    assert result["eligible_tickers"] == ["AAPL", "MSFT", "GOOGL", "JPM"]
+    assert result["excluded_tickers"] == ["SPY"]
+    assert result["weights"][tickers.index("SPY")] == pytest.approx(0.0, abs=1e-8)
+    assert "etf" not in result["sector_weights"]
+    assert result["sector_weights"]["financials"] >= 0.0
