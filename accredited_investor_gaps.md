@@ -547,24 +547,24 @@ Score meaning:
 
 The scores below are directional and are meant to help judge relative position, not to claim vendor-by-vendor precision.
 
-| Capability Area | This Repo | Planning Systems | Advisor Platforms | Alternative-Investment Platforms | Tax-Managed Implementation Systems |
-| --- | --- | --- | --- | --- | --- |
-| Liquid public-market optimization flexibility | 4 | 1 | 2 | 1 | 4 |
-| Liquid versus illiquid sleeve handling | 0 | 2 | 2 | 4 | 1 |
-| Alternative asset and private-fund representation | 0 | 1 | 2 | 5 | 1 |
-| Liquidity budgeting and reserve handling | 1 | 2 | 3 | 4 | 2 |
-| Concentration and exposure controls | 2 | 2 | 3 | 3 | 4 |
-| Policy and restriction handling | 2 | 2 | 4 | 3 | 4 |
-| Benchmark or policy-sleeve handling | 1 | 2 | 3 | 2 | 3 |
-| Tax-lot awareness | 0 | 1 | 2 | 0 | 5 |
-| Tax-aware rebalancing | 0 | 1 | 2 | 0 | 5 |
-| Suitability and offering workflow | 0 | 2 | 3 | 5 | 2 |
-| Custodial and books-of-record integration | 0 | 1 | 5 | 2 | 3 |
-| Audit trail and compliance workflow | 1 | 2 | 4 | 4 | 4 |
-| Proposal and advisor workflow support | 1 | 4 | 5 | 3 | 3 |
-| Reporting and client-ready output | 1 | 4 | 5 | 3 | 2 |
-| Transparent optimizer semantics | 4 | 1 | 2 | 1 | 3 |
-| Custom quantitative extensibility | 4 | 1 | 2 | 1 | 3 |
+| Capability Area                                   | This Repo | Planning Systems | Advisor Platforms | Alternative-Investment Platforms | Tax-Managed Implementation Systems |
+| ------------------------------------------------- | --------- | ---------------- | ----------------- | -------------------------------- | ---------------------------------- |
+| Liquid public-market optimization flexibility     | 4         | 1                | 2                 | 1                                | 4                                  |
+| Liquid versus illiquid sleeve handling            | 0         | 2                | 2                 | 4                                | 1                                  |
+| Alternative asset and private-fund representation | 0         | 1                | 2                 | 5                                | 1                                  |
+| Liquidity budgeting and reserve handling          | 1         | 2                | 3                 | 4                                | 2                                  |
+| Concentration and exposure controls               | 2         | 2                | 3                 | 3                                | 4                                  |
+| Policy and restriction handling                   | 2         | 2                | 4                 | 3                                | 4                                  |
+| Benchmark or policy-sleeve handling               | 1         | 2                | 3                 | 2                                | 3                                  |
+| Tax-lot awareness                                 | 0         | 1                | 2                 | 0                                | 5                                  |
+| Tax-aware rebalancing                             | 0         | 1                | 2                 | 0                                | 5                                  |
+| Suitability and offering workflow                 | 0         | 2                | 3                 | 5                                | 2                                  |
+| Custodial and books-of-record integration         | 0         | 1                | 5                 | 2                                | 3                                  |
+| Audit trail and compliance workflow               | 1         | 2                | 4                 | 4                                | 4                                  |
+| Proposal and advisor workflow support             | 1         | 4                | 5                 | 3                                | 3                                  |
+| Reporting and client-ready output                 | 1         | 4                | 5                 | 3                                | 2                                  |
+| Transparent optimizer semantics                   | 4         | 1                | 2                 | 1                                | 3                                  |
+| Custom quantitative extensibility                 | 4         | 1                | 2                 | 1                                | 3                                  |
 
 ## Readout From The Matrix
 
@@ -649,21 +649,21 @@ Score meaning:
 - `Dependency Risk`: `Low`, `Medium`, `High`
 - `Market Impact`: `Low`, `Medium`, `High`, `Very High`
 
-| Rank | Work Item | Effort | Dependency Risk | Market Impact | Why It Belongs Here |
-| --- | --- | --- | --- | --- | --- |
-| 1 | Add sleeve-aware portfolio inputs | Medium | Medium | Very High | This is the first structural step toward representing accredited-investor portfolios honestly. |
-| 2 | Add concentration and liquidity-budget controls | Medium | Medium | Very High | This improves real-world usability for portfolios mixing liquid and illiquid exposure. |
-| 3 | Persist recommendation assumptions and rationale | Low | Low | High | This improves advisor trust, repeatability, and product usability quickly. |
-| 4 | Add recommendation records and workflow states | Medium | Medium | High | This moves the repo closer to an actual operating tool instead of a one-shot optimizer. |
-| 5 | Add benchmark and policy-sleeve inputs | Medium | Medium | High | This makes the tool more suitable for model-portfolio and policy-range workflows. |
-| 6 | Define private-product metadata model | Medium | High | High | This is a prerequisite for any serious alternative-investment support. |
-| 7 | Add alternative-asset placeholder and reporting support | Medium | High | High | This allows the liquid sleeve to be optimized in the context of an existing alternatives book. |
-| 8 | Add liquidity-term metadata such as lockups and notice periods | Medium | High | High | This is required before the system can speak credibly about liquidity management. |
-| 9 | Add capital-call and distribution-aware portfolio views | High | High | High | This is a major step toward alternatives-aware portfolio management. |
-| 10 | Add suitability and offering workflow support | High | High | Very High | This is essential if the repo is meant to participate in accredited-offering workflows. |
-| 11 | Add tax-lot ingestion for taxable public sleeves | High | High | High | This is the prerequisite for after-tax public-market implementation. |
-| 12 | Add tax-aware rebalance logic | Very High | High | High | Important, but should follow the data-model work instead of coming first. |
-| 13 | Add custodian and administrator integrations | Very High | High | Very High | This is strategically important but operationally expensive and integration-heavy. |
+| Rank | Work Item                                                      | Effort    | Dependency Risk | Market Impact | Why It Belongs Here                                                                            |
+| ---- | -------------------------------------------------------------- | --------- | --------------- | ------------- | ---------------------------------------------------------------------------------------------- |
+| 1    | Add sleeve-aware portfolio inputs                              | Medium    | Medium          | Very High     | This is the first structural step toward representing accredited-investor portfolios honestly. |
+| 2    | Add concentration and liquidity-budget controls                | Medium    | Medium          | Very High     | This improves real-world usability for portfolios mixing liquid and illiquid exposure.         |
+| 3    | Persist recommendation assumptions and rationale               | Low       | Low             | High          | This improves advisor trust, repeatability, and product usability quickly.                     |
+| 4    | Add recommendation records and workflow states                 | Medium    | Medium          | High          | This moves the repo closer to an actual operating tool instead of a one-shot optimizer.        |
+| 5    | Add benchmark and policy-sleeve inputs                         | Medium    | Medium          | High          | This makes the tool more suitable for model-portfolio and policy-range workflows.              |
+| 6    | Define private-product metadata model                          | Medium    | High            | High          | This is a prerequisite for any serious alternative-investment support.                         |
+| 7    | Add alternative-asset placeholder and reporting support        | Medium    | High            | High          | This allows the liquid sleeve to be optimized in the context of an existing alternatives book. |
+| 8    | Add liquidity-term metadata such as lockups and notice periods | Medium    | High            | High          | This is required before the system can speak credibly about liquidity management.              |
+| 9    | Add capital-call and distribution-aware portfolio views        | High      | High            | High          | This is a major step toward alternatives-aware portfolio management.                           |
+| 10   | Add suitability and offering workflow support                  | High      | High            | Very High     | This is essential if the repo is meant to participate in accredited-offering workflows.        |
+| 11   | Add tax-lot ingestion for taxable public sleeves               | High      | High            | High          | This is the prerequisite for after-tax public-market implementation.                           |
+| 12   | Add tax-aware rebalance logic                                  | Very High | High            | High          | Important, but should follow the data-model work instead of coming first.                      |
+| 13   | Add custodian and administrator integrations                   | Very High | High            | Very High     | This is strategically important but operationally expensive and integration-heavy.             |
 
 ## Minimum Feature Set: Credible Accredited-Investor Liquid-Sleeve Platform
 

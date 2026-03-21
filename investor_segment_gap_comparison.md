@@ -19,18 +19,18 @@ Both require more than straightforward coding. They diverge in what kind of comp
 
 ## Side-By-Side Comparison
 
-| Dimension | High-Net-Worth Focus | Accredited-Investor Focus |
-| --- | --- | --- |
-| Core missing structure | household and multi-account modeling | multi-sleeve liquid and illiquid modeling |
-| Primary implementation challenge | after-tax household optimization | alternatives, liquidity, and offering workflow |
-| Most important data gap | tax lots, household/account mapping, custodial truth | private-product metadata, commitments, calls, distributions, liquidity terms |
-| Most important workflow gap | proposal, approval, compliance, and household implementation workflow | suitability, offering eligibility, sleeve reporting, and liquidity oversight |
-| Tax complexity | central and unavoidable | important, but often secondary to sleeve and product structure at first |
-| Alternatives complexity | relevant but not always dominant | usually central to the segment definition |
-| Planning overlap | high | moderate |
-| Family-office operating overlap | high | lower unless the accredited investor is also an HNW household |
-| Benchmark/policy need | policy portfolio and household mandate framing | sleeve policy and liquid-versus-illiquid allocation framing |
-| Best current repo fit | pre-tax HNW decision-support engine for one portfolio at a time | liquid public-markets engine inside a broader accredited-investor stack |
+| Dimension                        | High-Net-Worth Focus                                                  | Accredited-Investor Focus                                                    |
+| -------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Core missing structure           | household and multi-account modeling                                  | multi-sleeve liquid and illiquid modeling                                    |
+| Primary implementation challenge | after-tax household optimization                                      | alternatives, liquidity, and offering workflow                               |
+| Most important data gap          | tax lots, household/account mapping, custodial truth                  | private-product metadata, commitments, calls, distributions, liquidity terms |
+| Most important workflow gap      | proposal, approval, compliance, and household implementation workflow | suitability, offering eligibility, sleeve reporting, and liquidity oversight |
+| Tax complexity                   | central and unavoidable                                               | important, but often secondary to sleeve and product structure at first      |
+| Alternatives complexity          | relevant but not always dominant                                      | usually central to the segment definition                                    |
+| Planning overlap                 | high                                                                  | moderate                                                                     |
+| Family-office operating overlap  | high                                                                  | lower unless the accredited investor is also an HNW household                |
+| Benchmark/policy need            | policy portfolio and household mandate framing                        | sleeve policy and liquid-versus-illiquid allocation framing                  |
+| Best current repo fit            | pre-tax HNW decision-support engine for one portfolio at a time       | liquid public-markets engine inside a broader accredited-investor stack      |
 
 ## Where The Repo Is Closer Today
 
