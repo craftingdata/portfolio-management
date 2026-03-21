@@ -8,7 +8,6 @@ Read the attached design or requirement. Produce a step-by-step implementation p
 - One task per line, in dependency order
 - For each task: what changes, which files, how to verify
 - Flag any guardrail conflicts from `.github/copilot-instructions.md` and the matching `.github/instructions/*.instructions.md` files
-- Flag repo-split boundary crossings (shell vs plugin)
 - Do NOT write any code — plan only
 
 Save the plan to a markdown file in the project root named after the feature (e.g., `feature-plan.md`) before ending.

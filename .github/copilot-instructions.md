@@ -1,97 +1,42 @@
-# Copilot workspace instructions (Shire)
+# Copilot Workspace Instructions
 
-These instructions exist to keep Copilot changes safe, consistent, and aligned with how this repo is operated.
+These instructions keep Copilot changes aligned with this repository's actual shape: a small Python FastAPI service for portfolio optimization.
 
 ## What this repo does
 
-- Deploys an OpenClaw gateway on Azure Container Apps (ACA) per **slug**.
-- Security posture: **Entra Easy Auth at the app boundary + per-slug allowlist**.
-- A working auth check often surfaces `disconnected (1008): pairing required` once the request is authenticated.
+- Exposes a FastAPI API for portfolio optimization and portfolio ranking.
+- Uses market data fetched in `app/services/data_service.py`, with synthetic fallback data when needed.
+- Runs several optimization strategies in `app/services/optimization.py` and ranks them in `app/services/ranking.py`.
 
-## Non-negotiable invariants
+## Working assumptions
 
-- One channel = one slug = one ACA app.
-- Isolation is per-slug deployments (not in-app multitenancy).
-- **Entra auth is mandatory**.
-- **Tenant-wide access is invalid**. Every slug must be restricted to Entra groups.
-  - Admin group: `shire-admins`
-  - Slug group: `shire-<slug>`
-
-## Powershell operation
-
-Always append ; echo "" to PowerShell commands
-
-## Preferred operator workflow
-
-- Use the wrapper CLI:
-  - `./scripts/shire.ps1 list`
-  - `./scripts/shire.ps1 teams-bootstrap` (one-time per subscription)
-  - `./scripts/shire.ps1 deploy -Slug <slug> [-FixRbacConflicts]` (default)
-  - `./scripts/shire.ps1 teams-discover -Slug <slug>` (prints appId/FQDN/bot and next commands)
-  - `./scripts/shire.ps1 teams-site-grant -MsteamsAppId <appId> -SiteUrl <sharepoint-site-url> [-SiteRole write|read]` (per channel site)
-  - `./scripts/shire.ps1 install -Slug <slug> -Location eastus2`
-  - `./scripts/shire.ps1 rbac-guardrail -Slug <slug> [-FixRbacConflicts]`
-  - `./scripts/shire.ps1 upgrade -Slug <slug> [-Commit <sha>] [-FixRbacConflicts]`
-  - `./scripts/shire.ps1 remove -Slug <slug> -Confirm -PurgeKV -Wait`
-  - `./scripts/shire.ps1 verify -Slug <slug>`
-
-Compatibility:
-
-- `./scripts/shire.ps1` is the only supported wrapper CLI.
-
-## Debugging discipline
-
-When investigating deployment, Easy Auth, Key Vault, Graph, or runtime regressions:
-
-- State the primary acceptance condition before changing code or Azure state.
-- Split work into two tracks:
-  - live mitigation to restore service
-  - root-cause isolation to fix the repo
-- Do not mix mitigation steps with root-cause claims.
-- If the same live symptom repeats after one deploy, stop redeploying and reproduce the failing helper logic locally or with direct CLI/API calls.
-- Do not request more than:
-  - 1 deploy to reproduce
-  - 1 deploy to verify a fix
-    unless you can name the new evidence learned from the previous deploy.
-- Prefer direct reproduction of helper behavior over repeated wrapper runs:
-  - inspect the exact Graph query
-  - inspect the exact Key Vault secret write path
-  - inspect the exact Container App auth config path
-- Treat repeated creation of Entra apps, groups, or secrets as a code-path regression first, not a tenant-side mystery.
-- Before cleanup or manual Azure mutation, explain whether the action is:
-  - mitigation only
-  - root-cause verification
-  - final fix verification
-- If a helper returns inconsistent results, reproduce the exact call shape outside the helper before changing live resources.
-- For PowerShell deployment script changes, require:
-  - a PowerShell parse check
-  - a focused regression test
-  - one clear statement of what the next deploy is meant to prove
-
-## Context recovery / recreate a slug (example: sam)
-
-When you want a deterministic recreate:
-
-1. Remove cached outputs (prevents reusing stale infra IDs):
-   - delete `deployment.outputs.json` in the repo root if present
-2. Delete the slug resource group:
-   - `claw-<slug>`
-3. If reusing derived Key Vault names, purge soft-deleted Key Vaults (KV purge is destructive).
-4. Keep (or delete) the Entra Easy Auth app registration:
-   - Keep it if you want to preserve the client/app id.
-   - Delete it only if you explicitly want a new client/app id.
-5. Deploy:
-   - `./scripts/shire.ps1 install -Slug <slug> -Location eastus2`
+- The codebase is Python-only in its current form.
+- Dependency management is driven by `requirements.txt`, not `uv`, Poetry, or a monorepo toolchain.
+- Tests live under `tests/` and are run with `pytest`.
 
 ## Repo structure pointers
 
-- IaC entrypoints:
-  - `infra/bicep/sub/main.bicep` (subscription scope wrapper)
-  - `infra/bicep/main.bicep` (resource group scope)
-- Slug params live in `infra/bicep/params/<slug>.bicepparam`.
+- API entrypoint: `app/main.py`
+- Schemas: `app/models/schemas.py`
+- Services: `app/services/`
+- Tests: `tests/`
+
+## Editing guidance
+
+- Keep changes surgical. This is a small codebase; avoid introducing framework or architecture complexity unless the user asks for it.
+- Preserve the public API contract unless the task explicitly requires changing request or response models.
+- Prefer deterministic tests that mock external market-data access instead of relying on live network calls.
+- When changing optimizer or ranking behavior, update the narrowest relevant tests in `tests/`.
+
+## Verification
+
+- Default local verification is:
+  - `python -m pip install -r requirements.txt`
+  - `python -m pytest tests -q`
+- For focused changes, run the narrowest relevant pytest target first.
 
 ## Do not do
 
-- Do not suggest or implement a mode that allows "any authenticated tenant user".
-- Do not introduce secrets into git (client secrets, gateway tokens, etc.).
-- Do not bypass the scripts unless asked; they encode required behavior (group allowlists, KV secret handling, outputs capture).
+- Do not add Azure, deployment, or infrastructure guidance unless the repository actually grows those assets.
+- Do not introduce secrets or environment-specific credentials into git.
+- Do not rewrite the optimization stack or change model semantics without explicit user request.

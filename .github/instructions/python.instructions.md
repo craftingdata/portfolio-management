@@ -2,27 +2,30 @@
 applyTo: "**/*.py"
 ---
 
-# Python Development Standards (condensed)
+# Python Development Standards
 
 ## Type Safety
 
-- Use type hints on all public function signatures. Avoid `Any` in production code.
+- Use type hints on new or changed public function signatures.
+- Prefer concrete types over `Any` unless a library boundary makes that impractical.
 
-## Financial Precision
+## Numerical Work
 
-- Use `Decimal` for money and quantities; do not use floats for prices.
+- Keep numerical code consistent with the existing implementation style.
+- This repo currently uses `float`, NumPy arrays, pandas objects, and SciPy/SCIP inputs for optimization math. Do not force `Decimal` into solver-facing code unless the task is explicitly about numeric precision redesign.
+- Be careful with shape assumptions, ticker ordering, and conversions between arrays, Series, and dict responses.
 
-## Async / DB Patterns
+## FastAPI Patterns
 
-- Use `async with` for `AsyncSession` and `await` for async operations.
+- Keep request and response validation in Pydantic schemas where practical.
+- Raise `HTTPException` for API-layer failures and keep service-layer logic separate from route handlers.
 
-## Formatting
+## Tests and Mocking
 
-- Prefer `ruff` for formatting and linting.
-- Default loop: `uv run ruff format .` then `uv run ruff check .`.
-- Follow repo tooling for line length and formatting; current `ruff` settings live in `pyproject.toml`.
+- Prefer deterministic tests that patch market-data fetching instead of calling external services.
+- When changing behavior, add or update focused tests under `tests/`.
 
-## Configuration Sources
+## Tooling
 
-- Prefer centralized configuration: use Azure App Configuration and Key Vault for secrets and runtime settings.
-- Avoid using raw environment variables for application secrets or multi-value configuration in production; prefer platform-managed config and secret stores.
+- This repo does not currently define `pyproject.toml`, `uv.lock`, or `ruff` configuration.
+- Use the existing lightweight workflow unless the user asks to introduce new tooling.

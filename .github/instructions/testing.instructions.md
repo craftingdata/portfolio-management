@@ -8,8 +8,7 @@ applyTo: "**/*.py,**/test_*,**/conftest*"
 ## Default Validation Loop
 
 - Prefer running a fast local loop before considering work complete:
-  - `uv run ruff format .`
-  - `uv run ruff check .`
+  - `python -m pip install -r requirements.txt`
   - `python -m pytest <focused target>`
 
 ## Tests

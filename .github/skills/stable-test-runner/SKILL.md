@@ -1,24 +1,23 @@
 ---
 name: stable-test-runner
-description: Stable test-running guidance for this repo using the in-repo .venv, uv-managed dependencies, and focused pytest targets.
+description: Stable test-running guidance for this repo using requirements.txt and focused pytest targets.
 ---
 
 # When This Skill Applies
 
-- Running or re-running tests after changing scripts, docs, or Bicep validation logic
+- Running or re-running tests after changing Python application code or tests
 - Choosing the smallest reliable pytest target for a change
-- Checking whether the local environment is ready before running tests
+- Checking whether local dependencies are installed before running tests
 
 ## Core guidance
 
 - Prefer focused test runs over whole-suite runs.
-- Use the repository `.venv` and run pytest in module mode: `python -m pytest`.
-- This repo uses `uv` metadata and keeps a committed `uv.lock`; do not replace that with Poetry-specific instructions.
+- Install dependencies from `requirements.txt` and run pytest in module mode: `python -m pytest`.
 - There is no standard `dev` pytest marker in this repo. Use a file path or `-k` expression instead.
 
 ## Recommended workflow
 
-1. Activate the in-repo virtual environment if it exists.
+1. Install dependencies from `requirements.txt` if the environment is not prepared.
 2. Verify `pytest` is importable before running tests.
 3. Run the narrowest useful command first.
 4. Expand scope only if the first run passes and the change warrants broader coverage.
@@ -27,23 +26,22 @@ description: Stable test-running guidance for this repo using the in-repo .venv,
 
 ```bash
 # Single file
-python -m pytest tests/test_scripts_and_workflow.py -q
+python -m pytest tests/test_api.py -q
 
 # Focused keyword expression
-python -m pytest tests/test_scripts_and_workflow.py -k "remove_install" -q
+python -m pytest tests/test_optimization.py -k "sharpe" -q
 
 # Full repo tests only when justified
-python -m pytest -q
+python -m pytest tests -q
 ```
 
 ## Guardrails
 
 - Do not assume `pytest-xdist` is installed.
 - Do not assume `dev`, `azure`, or other custom markers unless they are defined in the repo config.
-- Do not tell agents to install ad hoc tool versions. If environment refresh is needed, use the repo's committed manifests.
+- Do not assume `uv`, `pyproject.toml`, or `uv.lock` exist.
 
 ## References
 
-- `pyproject.toml`
-- `uv.lock`
+- `requirements.txt`
 - `tests/`

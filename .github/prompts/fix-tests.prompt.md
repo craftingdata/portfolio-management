@@ -10,4 +10,4 @@ Debug the failing tests.
 3. Fix the minimal code path: do not rewrite passing tests or refactor unrelated code
 4. Re-run to confirm green
 
-If the fix requires a schema change, stop and flag it — Alembic migration + manual approval is required.
+If the fix requires changing the public API contract, stop and flag it before proceeding.
