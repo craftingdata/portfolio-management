@@ -323,3 +323,37 @@ def test_sector_allocation_transaction_cost_and_integer_models(price_frame_data)
     assert round_lot_result["cash_weight"] >= 0.0
     assert np.allclose(np.mod(round_lot_result["shares"], lot_sizes), 0.0)
     assert np.allclose(round_lot_result["shares"], round_lot_result["lot_units"] * lot_sizes)
+
+
+def test_transaction_cost_rebalancing_supports_per_asset_calibration(price_frame_data):
+    tickers, prices_df, returns_df, mu, sigma = price_frame_data
+    result = transaction_cost_rebalancing(
+        mu,
+        sigma,
+        current_weights=np.array([0.25, 0.20, 0.20, 0.20, 0.15]),
+        tickers=tickers,
+        risk_level=0.5,
+        transaction_cost_model="interactive_brokers_fixed",
+        transaction_cost_rate=0.001,
+        per_asset_transaction_costs={"AAPL": 0.0025, "SPY": 0.0005},
+        market_impact_coefficient=0.025,
+        per_asset_market_impact_coefficients={"AAPL": 0.04, "SPY": 0.01},
+        average_daily_dollar_volume={
+            "AAPL": 2_000_000.0,
+            "MSFT": 7_000_000.0,
+            "GOOGL": 8_000_000.0,
+            "JPM": 6_000_000.0,
+            "SPY": 20_000_000.0,
+        },
+        impact_adv_floor=5_000_000.0,
+        total_amount=100000.0,
+    )
+
+    assert result["transaction_cost_model"] == "interactive_brokers_fixed"
+    assert len(result["transaction_cost_rates"]) == len(tickers)
+    assert len(result["market_impact_rates"]) == len(tickers)
+    assert len(result["combined_penalty_rates"]) == len(tickers)
+    assert result["impact_adv_floor"] == 5_000_000.0
+    assert result["transaction_cost_rates"][0] > result["transaction_cost_rates"][-1]
+    assert result["combined_penalty_rates"][0] > result["combined_penalty_rates"][-1]
+    assert_valid_portfolio(result, len(mu))

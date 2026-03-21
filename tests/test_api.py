@@ -195,6 +195,45 @@ def test_optimize_accepts_factor_contract_and_lot_sizes(client):
     assert "CardinalityMinBuyIn" in model_names
 
 
+def test_optimize_passes_execution_cost_configuration(client):
+    captured = {}
+
+    def fake_run_all_models(**kwargs):
+        captured.update(kwargs)
+        return {
+            "MinimumVariance": {
+                "model_name": "MinimumVariance",
+                "weights": np.array([0.4, 0.35, 0.25]),
+                "expected_return": 0.10,
+                "expected_risk": 0.12,
+                "sharpe_ratio": 0.50,
+            }
+        }
+
+    with patch("app.main.get_market_data", side_effect=lambda **kwargs: _make_mock_market_data(tickers=["AAPL", "MSFT", "SPY"])):
+        with patch("app.main.get_market_liquidity", return_value={"AAPL": 2_000_000.0, "MSFT": 8_000_000.0, "SPY": 20_000_000.0}):
+            with patch("app.main.run_all_models", side_effect=fake_run_all_models):
+                response = client.post("/optimize", json={
+                    "total_amount": 100000,
+                    "risk_tolerance": "medium",
+                    "investment_horizon": "medium",
+                    "tickers": ["AAPL", "MSFT", "SPY"],
+                    "current_weights": {"AAPL": 0.4, "MSFT": 0.3, "SPY": 0.3},
+                    "transaction_cost_model": "interactive_brokers_fixed",
+                    "transaction_cost_rate": 0.001,
+                    "per_asset_transaction_costs": {"AAPL": 0.002, "SPY": 0.0005},
+                    "market_impact_coefficient": 0.025,
+                    "per_asset_market_impact_coefficients": {"AAPL": 0.04},
+                    "impact_adv_floor": 7500000,
+                })
+
+    assert response.status_code == 200, response.text
+    assert captured["transaction_cost_model"] == "interactive_brokers_fixed"
+    assert captured["per_asset_transaction_costs"] == {"AAPL": 0.002, "SPY": 0.0005}
+    assert captured["per_asset_market_impact_coefficients"] == {"AAPL": 0.04}
+    assert captured["impact_adv_floor"] == 7500000.0
+
+
 def test_optimize_low_risk(client):
     with patch("app.main.get_market_data", side_effect=_make_mock_market_data):
         response = client.post("/optimize", json={
@@ -250,6 +289,17 @@ def test_validation_invalid_estimator_choice(client):
         "risk_tolerance": "medium",
         "investment_horizon": "medium",
         "return_estimator": "unsupported",
+    })
+
+    assert response.status_code == 422
+
+
+def test_validation_invalid_transaction_cost_model(client):
+    response = client.post("/optimize", json={
+        "total_amount": 10000,
+        "risk_tolerance": "medium",
+        "investment_horizon": "medium",
+        "transaction_cost_model": "unsupported",
     })
 
     assert response.status_code == 422

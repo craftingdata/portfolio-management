@@ -6,6 +6,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_TRANSACTION_COST_MODEL = "interactive_brokers_fixed"
+DEFAULT_TRANSACTION_COST_RATE = 0.001
+DEFAULT_MARKET_IMPACT_COEFFICIENT = 0.025
+DEFAULT_IMPACT_ADV_FLOOR = 5_000_000.0
+
 
 @dataclass
 class FactorModelData:
@@ -56,6 +61,45 @@ def _vector_from_current_weights(current_weights: Optional[Dict[str, float]], ti
     if np.allclose(weights.sum(), 0.0):
         return np.ones(len(tickers)) / len(tickers)
     return _normalize_weights(weights)
+
+
+def _resolve_execution_penalties(
+    tickers: List[str],
+    transaction_cost_model: str,
+    transaction_cost_rate: Optional[float],
+    per_asset_transaction_costs: Optional[Dict[str, float]],
+    market_impact_coefficient: Optional[float],
+    per_asset_market_impact_coefficients: Optional[Dict[str, float]],
+    average_daily_dollar_volume: Optional[Dict[str, float]],
+    total_amount: float,
+    impact_adv_floor: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if transaction_cost_model in {"interactive_brokers_fixed", "default"}:
+        base_transaction_cost_rate = DEFAULT_TRANSACTION_COST_RATE if transaction_cost_rate is None else float(max(transaction_cost_rate, 0.0))
+    else:
+        base_transaction_cost_rate = float(max(transaction_cost_rate or 0.0, 0.0))
+
+    transaction_cost_rates = np.full(len(tickers), base_transaction_cost_rate, dtype=float)
+    if per_asset_transaction_costs:
+        for index, ticker in enumerate(tickers):
+            if ticker in per_asset_transaction_costs:
+                transaction_cost_rates[index] = float(max(per_asset_transaction_costs[ticker], 0.0))
+
+    base_market_impact = DEFAULT_MARKET_IMPACT_COEFFICIENT if market_impact_coefficient is None else float(max(market_impact_coefficient, 0.0))
+    market_impact_rates = np.full(len(tickers), base_market_impact, dtype=float)
+    if per_asset_market_impact_coefficients:
+        for index, ticker in enumerate(tickers):
+            if ticker in per_asset_market_impact_coefficients:
+                market_impact_rates[index] = float(max(per_asset_market_impact_coefficients[ticker], 0.0))
+
+    impact_penalties = np.zeros(len(tickers), dtype=float)
+    if average_daily_dollar_volume:
+        adv_floor = float(max(impact_adv_floor, 1.0))
+        for index, ticker in enumerate(tickers):
+            adv = float(max(float(average_daily_dollar_volume.get(ticker, adv_floor)), adv_floor))
+            impact_penalties[index] = market_impact_rates[index] * (float(max(total_amount, 1e-8)) / adv)
+
+    return transaction_cost_rates, market_impact_rates, transaction_cost_rates + impact_penalties
 
 
 def _scipy_min_variance(mu: np.ndarray, sigma: np.ndarray) -> np.ndarray:
@@ -742,9 +786,13 @@ def run_all_models(
     latest_prices: Optional[np.ndarray] = None,
     sector_metadata: Optional[Dict[str, Dict[str, str]]] = None,
     sector_max_weights: Optional[Dict[str, float]] = None,
+    transaction_cost_model: str = DEFAULT_TRANSACTION_COST_MODEL,
     transaction_cost_rate: Optional[float] = None,
+    per_asset_transaction_costs: Optional[Dict[str, float]] = None,
     average_daily_dollar_volume: Optional[Dict[str, float]] = None,
     market_impact_coefficient: Optional[float] = None,
+    per_asset_market_impact_coefficients: Optional[Dict[str, float]] = None,
+    impact_adv_floor: float = DEFAULT_IMPACT_ADV_FLOOR,
     total_amount: float = 1.0,
     max_positions: Optional[int] = None,
     min_position_weight: Optional[float] = None,
@@ -878,8 +926,12 @@ def run_all_models(
             "tickers": tickers,
             "risk_level": risk_level,
             "transaction_cost_rate": transaction_cost_rate,
+            "transaction_cost_model": transaction_cost_model,
+            "per_asset_transaction_costs": per_asset_transaction_costs,
             "market_impact_coefficient": float(max(market_impact_coefficient or 0.0, 0.0)),
+            "per_asset_market_impact_coefficients": per_asset_market_impact_coefficients,
             "average_daily_dollar_volume": average_daily_dollar_volume,
+            "impact_adv_floor": impact_adv_floor,
             "total_amount": total_amount,
             "risk_free_rate": risk_free_rate,
         }))
@@ -1162,24 +1214,32 @@ def transaction_cost_rebalancing(
     current_weights: np.ndarray,
     tickers: Optional[List[str]] = None,
     risk_level: float = 0.5,
+    transaction_cost_model: str = DEFAULT_TRANSACTION_COST_MODEL,
     transaction_cost_rate: float = 0.001,
+    per_asset_transaction_costs: Optional[Dict[str, float]] = None,
     market_impact_coefficient: float = 0.0,
+    per_asset_market_impact_coefficients: Optional[Dict[str, float]] = None,
     average_daily_dollar_volume: Optional[Dict[str, float]] = None,
+    impact_adv_floor: float = DEFAULT_IMPACT_ADV_FLOOR,
     total_amount: float = 1.0,
     risk_free_rate: float = 0.04,
 ) -> dict:
     n = len(mu)
     current_vector = _normalize_weights(np.array(current_weights, dtype=float))
-    transaction_cost_rate = float(max(transaction_cost_rate, 0.0))
-    market_impact_coefficient = float(max(market_impact_coefficient, 0.0))
     total_amount = float(max(total_amount, 1e-8))
     target_return = float(np.min(mu) + (np.max(mu) - np.min(mu)) * risk_level)
-    penalties = np.full(n, transaction_cost_rate, dtype=float)
-    if average_daily_dollar_volume:
-        ordered_tickers = tickers if tickers is not None else list(average_daily_dollar_volume.keys())
-        for index, ticker in enumerate(ordered_tickers):
-            adv = float(max(float(average_daily_dollar_volume.get(ticker, 5_000_000.0)), 5_000_000.0))
-            penalties[index] += market_impact_coefficient * (total_amount / adv)
+    ordered_tickers = tickers if tickers is not None else [str(index) for index in range(n)]
+    transaction_cost_rates, market_impact_rates, penalties = _resolve_execution_penalties(
+        tickers=ordered_tickers,
+        transaction_cost_model=transaction_cost_model,
+        transaction_cost_rate=transaction_cost_rate,
+        per_asset_transaction_costs=per_asset_transaction_costs,
+        market_impact_coefficient=market_impact_coefficient,
+        per_asset_market_impact_coefficients=per_asset_market_impact_coefficients,
+        average_daily_dollar_volume=average_daily_dollar_volume,
+        total_amount=total_amount,
+        impact_adv_floor=impact_adv_floor,
+    )
 
     weights = None
     trade_cost = 0.0
@@ -1248,6 +1308,11 @@ def transaction_cost_rebalancing(
         "weights": weights,
         "cash_weight": cash_weight,
         "trade_cost": trade_cost,
+        "transaction_cost_model": transaction_cost_model,
+        "transaction_cost_rates": transaction_cost_rates,
+        "market_impact_rates": market_impact_rates,
+        "combined_penalty_rates": penalties,
+        "impact_adv_floor": float(max(impact_adv_floor, 1.0)),
         "expected_return": realized_expected_return,
         "expected_risk": expected_risk,
         "sharpe_ratio": realized_sharpe,

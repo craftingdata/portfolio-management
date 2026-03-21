@@ -69,7 +69,11 @@ def optimize(request: OptimizeRequest):
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Metadata fetch error: {str(exc)}")
 
-    if request.current_weights is not None and request.market_impact_coefficient is not None and request.market_impact_coefficient > 0.0:
+    has_market_impact_input = (
+        (request.market_impact_coefficient is not None and request.market_impact_coefficient > 0.0)
+        or bool(request.per_asset_market_impact_coefficients)
+    )
+    if request.current_weights is not None and has_market_impact_input:
         try:
             average_daily_dollar_volume = get_market_liquidity(tickers=tickers, period_months=period_months)
         except Exception:
@@ -92,9 +96,13 @@ def optimize(request: OptimizeRequest):
             latest_prices=latest_prices,
             sector_metadata=sector_metadata,
             sector_max_weights=request.sector_max_weights,
+            transaction_cost_model=request.transaction_cost_model,
             transaction_cost_rate=request.transaction_cost_rate,
+            per_asset_transaction_costs=request.per_asset_transaction_costs,
             average_daily_dollar_volume=average_daily_dollar_volume,
             market_impact_coefficient=request.market_impact_coefficient,
+            per_asset_market_impact_coefficients=request.per_asset_market_impact_coefficients,
+            impact_adv_floor=request.impact_adv_floor,
             total_amount=request.total_amount,
             max_positions=request.max_positions,
             min_position_weight=request.min_position_weight,

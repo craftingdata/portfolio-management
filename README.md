@@ -114,8 +114,12 @@ Key request fields:
 - `max_cash_borrow`: borrowing allowance for cash-sleeve leverage.
 - `max_turnover`: turnover cap for rebalance-aware models.
 - `current_weights`: current portfolio weights used by turnover-aware and transaction-cost-aware rebalancing.
+- `transaction_cost_model`: execution-cost baseline, currently `interactive_brokers_fixed`, `default`, or `custom`.
 - `transaction_cost_rate`: one-way proportional trading-cost assumption.
 - `market_impact_coefficient`: linear ADV-scaled market-impact penalty coefficient.
+- `per_asset_transaction_costs`: optional per-asset trading-cost overrides keyed by ticker.
+- `per_asset_market_impact_coefficients`: optional per-asset market-impact overrides keyed by ticker.
+- `impact_adv_floor`: minimum ADV used when scaling market-impact penalties.
 - `max_positions`: maximum number of open positions for cardinality-constrained runs.
 - `min_position_weight`: minimum portfolio weight for newly opened positions.
 - `sector_max_weights`: optional sector caps keyed by normalized sector names.
@@ -170,8 +174,16 @@ Primary data behavior:
 
 Additional first-pass provider support:
 
+- lightweight provider abstraction for FMP-backed prices, metadata, and liquidity retrieval
 - sector and company metadata via FMP profile endpoints
 - average daily dollar volume derived from historical price and volume data
+
+Execution-cost defaults:
+
+- default transaction-cost model: `interactive_brokers_fixed`
+- default one-way transaction-cost rate: `10` bps
+- default market-impact coefficient: `0.025`
+- default ADV floor: `$5,000,000`
 
 Environment variables:
 
@@ -192,9 +204,9 @@ Main remaining gaps:
 - richer factor-model infrastructure beyond the current explicit-contract or market-factor proxy paths
 - broader sector and metadata normalization, especially ETF treatment and richer taxonomy handling
 - richer lot-size semantics beyond the current request-driven lot size assumptions
-- deeper transaction-cost calibration, including fixed-fee or broker-specific variants
-- more rigorous market-impact modeling and calibration
-- cleaner provider abstraction and deeper estimator families beyond the current sample and shrinkage options
+- deeper transaction-cost calibration beyond the current broker-calibrated default plus per-asset overrides, especially fixed-fee schedules
+- more rigorous market-impact modeling beyond the current linear ADV-based formulation
+- deeper estimator families and broader provider expansion beyond the current FMP-backed wrapper
 
 In other words: the major categories now exist, but some of them are still simplified first-pass implementations rather than complete notebook-family parity.
 

@@ -163,3 +163,56 @@ def test_get_market_liquidity_uses_historical_volume(monkeypatch):
 
     assert "AAPL" in liquidity
     assert liquidity["AAPL"] > 0
+
+
+def test_get_market_data_aligns_dates_and_drops_sparse_series(monkeypatch):
+    payloads = {
+        "AAPL": {
+            "historical": [
+                {"date": "2024-01-05", "adjClose": 104.0},
+                {"date": "2024-01-04", "adjClose": 103.0},
+                {"date": "2024-01-03", "adjClose": 102.0},
+                {"date": "2024-01-02", "adjClose": 100.0},
+            ]
+        },
+        "MSFT": {
+            "historical": [
+                {"date": "2024-01-05", "adjClose": 205.0},
+                {"date": "2024-01-04", "adjClose": 203.0},
+                {"date": "2024-01-03", "adjClose": 200.0},
+            ]
+        },
+        "SPY": {
+            "historical": [
+                {"date": "2024-01-05", "adjClose": 300.0},
+            ]
+        },
+    }
+    captured = {}
+
+    def fake_get(url, params, timeout):
+        ticker = url.rsplit("/", 1)[-1]
+        return _FakeResponse(payloads[ticker])
+
+    def fake_estimate(prices_df, api_key=None, return_estimator="sample", covariance_estimator="sample", mean_shrinkage=0.0, covariance_shrinkage=0.0):
+        captured["prices_df"] = prices_df.copy()
+        returns_df = prices_df.pct_change().dropna()
+        return SimpleNamespace(
+            returns_df=returns_df,
+            mu=returns_df.mean().to_numpy() * 252,
+            sigma_matrix=returns_df.cov().to_numpy() * 252,
+        )
+
+    monkeypatch.setattr(data_service, "get_fmp_api_key", lambda: "test-fmp-key")
+    monkeypatch.setattr(data_service.httpx, "get", fake_get)
+    monkeypatch.setattr(data_service, "estimate_market_inputs", fake_estimate)
+
+    prices_df, returns_df, mu, sigma = data_service.get_market_data(["AAPL", "MSFT", "SPY"], period_months=1)
+
+    assert list(captured["prices_df"].columns) == ["AAPL", "MSFT"]
+    assert len(captured["prices_df"]) == 3
+    assert not captured["prices_df"].isna().any().any()
+    assert list(prices_df.columns) == ["AAPL", "MSFT"]
+    assert returns_df.shape[1] == 2
+    assert mu.shape == (2,)
+    assert sigma.shape == (2, 2)

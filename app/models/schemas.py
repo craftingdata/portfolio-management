@@ -17,8 +17,12 @@ class OptimizeRequest(BaseModel):
     max_cash_borrow: Optional[float] = Field(0.25, ge=0.0, description="Maximum borrowable cash sleeve as a fraction of portfolio value")
     max_turnover: Optional[float] = Field(0.25, ge=0.0, description="Maximum total turnover relative to the starting portfolio")
     current_weights: Optional[Dict[str, float]] = Field(None, description="Current portfolio weights keyed by ticker for turnover-aware optimization")
+    transaction_cost_model: Optional[str] = Field("interactive_brokers_fixed", description="Execution-cost baseline: interactive_brokers_fixed, default, or custom")
     transaction_cost_rate: Optional[float] = Field(0.001, ge=0.0, description="One-way proportional transaction cost rate")
+    per_asset_transaction_costs: Optional[Dict[str, float]] = Field(None, description="Optional per-asset one-way transaction cost rates keyed by ticker")
     market_impact_coefficient: Optional[float] = Field(0.025, ge=0.0, description="Linear market-impact coefficient applied to traded notional versus liquidity")
+    per_asset_market_impact_coefficients: Optional[Dict[str, float]] = Field(None, description="Optional per-asset market-impact coefficients keyed by ticker")
+    impact_adv_floor: Optional[float] = Field(5_000_000.0, gt=0.0, description="Minimum average daily dollar volume used when scaling market impact")
     max_positions: Optional[int] = Field(None, ge=1, description="Maximum number of open positions for cardinality-constrained optimization")
     min_position_weight: Optional[float] = Field(None, ge=0.0, description="Minimum portfolio weight for a newly opened position")
     sector_max_weights: Optional[Dict[str, float]] = Field(None, description="Optional maximum sector weights keyed by normalized sector name")
@@ -72,6 +76,30 @@ class OptimizeRequest(BaseModel):
         if value not in allowed:
             raise ValueError(f"covariance_estimator must be one of {sorted(allowed)}")
         return value
+
+    @field_validator("transaction_cost_model", mode="before")
+    @classmethod
+    def validate_transaction_cost_model(cls, v):
+        if v is None:
+            return "interactive_brokers_fixed"
+        value = str(v).strip().lower()
+        allowed = {"interactive_brokers_fixed", "default", "custom"}
+        if value not in allowed:
+            raise ValueError(f"transaction_cost_model must be one of {sorted(allowed)}")
+        return value
+
+    @field_validator("per_asset_transaction_costs", "per_asset_market_impact_coefficients")
+    @classmethod
+    def validate_non_negative_rate_maps(cls, v):
+        if v is None:
+            return v
+        normalized = {}
+        for ticker, rate in v.items():
+            numeric_rate = float(rate)
+            if numeric_rate < 0.0:
+                raise ValueError("per-asset execution-cost inputs must be non-negative")
+            normalized[str(ticker).upper().strip()] = numeric_rate
+        return normalized
 
     @field_validator("lot_sizes")
     @classmethod

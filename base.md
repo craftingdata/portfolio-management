@@ -109,10 +109,10 @@ No package-management migration is needed. Continue using `uv`.
 
 The next model should be aware of these repo-specific realities:
 
-- `data_service.py` currently mixes provider concerns, cleaning, and estimation orchestration in one file.
+- `data_service.py` now has a lightweight FMP provider wrapper, but the public module still centralizes orchestration and synthetic fallback behavior.
 - `optimization.py` currently exposes one function per strategy plus `run_all_models()`. It now includes utility, leverage, and turnover-aware models, but it is still not split into model-builder abstractions.
 - `ranking.py` now blends heuristic tables with realized optimizer output quality and frontier context.
-- The API request model now exposes leverage, turnover, sector-cap, transaction-cost, market-impact, basic cardinality controls, estimator selection, explicit factor-model inputs, and configurable lot sizes, but the surrounding provider and validation layers are still relatively thin.
+- The API request model now exposes leverage, turnover, sector-cap, calibrated transaction-cost and market-impact controls, basic cardinality controls, estimator selection, explicit factor-model inputs, and configurable lot sizes, but the surrounding provider and validation layers are still relatively thin.
 - Synthetic fallback still exists in `data_service.py`; it should be treated as test/degradation behavior, not as a preferred production path.
 - FinanceToolkit diagnostics are best-effort. The optimizer should not depend on FinanceToolkit outputs to function.
 
@@ -124,7 +124,7 @@ The focused command that already passes after the latest changes is:
 uv run pytest tests -q
 ```
 
-Most recent verified result before this handoff: `38 passed`.
+Most recent verified result before this handoff: `45 passed`.
 
 General repo test command:
 
@@ -136,12 +136,12 @@ uv run pytest tests -q
 
 The repo now has first-pass implementations for the major advanced notebook families, but it is still short of broader parity in a few important areas:
 
-- richer factor-model infrastructure beyond the current market-factor proxy
+- richer factor-model infrastructure beyond the current explicit-contract or market-factor proxy paths
 - broader metadata normalization, ETF handling, and sector/industry semantics
-- richer lot-size semantics beyond the current one-share default
-- deeper transaction-cost calibration, including per-asset or broker-specific assumptions
-- more rigorous market-impact modeling and calibration
-- provider abstraction and estimator configurability hardening
+- richer lot-size semantics beyond the current request-driven lot-size assumptions
+- deeper transaction-cost calibration beyond the current Interactive Brokers-style baseline plus per-asset overrides, especially fixed-fee schedules
+- more rigorous market-impact modeling beyond the current linear ADV-based formulation
+- deeper provider expansion and estimator families beyond the current FMP wrapper and sample or shrinkage options
 
 ## Coverage Verification
 
@@ -1077,7 +1077,7 @@ Decisions that still remain:
 
 Implementation status:
 
-- implemented in a first-pass form with proportional costs, explicit buy/sell variables, and request-level cost inputs; remaining work is richer calibration and fixed-fee or broker-specific variants
+- implemented in a richer first-pass form with calibrated Interactive Brokers-style defaults, explicit buy/sell variables, per-asset transaction-cost overrides, and request-level market-impact controls; remaining work is fixed-fee and more nonlinear execution models
 
 ### Market Impact
 
@@ -1116,7 +1116,7 @@ Decisions that still remain:
 
 Implementation status:
 
-- partially implemented through an ADV-based linear penalty path; remaining work is deeper calibration and richer impact formulations
+- implemented in a calibrated first-pass form through an ADV-based linear penalty path, a request-level ADV floor, and optional per-asset impact overrides; remaining work is deeper nonlinear calibration and richer impact formulations
 
 ### Summary Of What Is Data-Sourced Versus Decision-Gated
 
@@ -1363,10 +1363,10 @@ Current repo status:
 
 If another model is given only this file, the correct next implementation sequence is:
 
-1. refactor `app/services/data_service.py` into cleaner provider, cleaning, metadata, and liquidity helpers without breaking `get_market_data()`
-2. extend `app/services/estimation.py` with explicit estimator configuration while preserving current defaults
-3. deepen factor-model support beyond the current market-factor proxy into a cleaner reusable factor-data pipeline
-4. harden sector, round-lot, transaction-cost, and market-impact calibration semantics toward broader notebook-family parity
+1. deepen factor-model support beyond the current explicit-contract and market-factor proxy paths into a cleaner reusable factor-data pipeline
+2. broaden sector and metadata normalization, especially ETF treatment and richer taxonomy handling
+3. harden round-lot semantics beyond request-driven lot sizes toward richer market-specific metadata
+4. extend transaction-cost and market-impact modeling beyond the current broker-calibrated linear defaults toward fixed-fee and higher-fidelity formulations
 5. keep documentation aligned with the implemented model surface as parity work lands
 
 That sequence reflects the current state of the repo: first-pass advanced model families already exist, so the remaining work is cleanup, calibration, richer data contracts, and documentation alignment.
@@ -1375,20 +1375,23 @@ That sequence reflects the current state of the repo: first-pass advanced model 
 
 Implement in this order unless the user changes priorities:
 
-1. Provider abstraction and data pipeline cleanup
-2. Estimation pipeline hardening
-3. Richer factor-model support
-4. Portfolio-constraint hardening and richer metadata semantics
-5. Transaction-cost and market-impact calibration depth
-6. Ranking cleanup for richer output families
-7. API refinement only where new parity work truly requires it
-8. Documentation alignment as parity work lands
+1. Richer factor-model support
+2. Portfolio-constraint hardening and richer metadata semantics
+3. Transaction-cost and market-impact calibration depth
+4. Ranking cleanup for richer output families
+5. API refinement only where new parity work truly requires it
+6. Documentation alignment as parity work lands
 
 ## Priority 1: Provider Abstraction And Data Pipeline Cleanup
 
+Status update:
+
+- completed in a first-pass form through a lightweight FMP provider wrapper, shared price-alignment logic, and deterministic tests for metadata, liquidity, differing dates, and sparse ticker series
+- remaining work in this area is broader provider expansion, not the initial abstraction
+
 ### Why This Comes First
 
-The repo already talks to FMP, but the provider logic is not yet abstracted. Future sector constraints, benchmark-aware estimation, and metadata-driven rules need a cleaner provider boundary.
+The repo already talks to FMP through a lightweight provider wrapper. Future sector constraints, benchmark-aware estimation, and metadata-driven rules still need broader provider expansion, but the initial boundary is now in place.
 
 ### Primary Files To Edit
 
