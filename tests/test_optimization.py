@@ -4,6 +4,9 @@ from app.services.optimization import (
     minimum_variance,
     maximum_return,
     utility_maximization,
+    leverage_short_selling,
+    leverage_borrowing,
+    turnover_constrained_mean_variance,
     max_sharpe_ratio,
     mean_variance,
     equal_weight,
@@ -39,8 +42,12 @@ def assert_valid_portfolio(result, n):
     """Common assertions for all portfolio results."""
     weights = result["weights"]
     assert len(weights) == n, f"Expected {n} weights, got {len(weights)}"
-    assert abs(weights.sum() - 1.0) < 1e-4, f"Weights sum {weights.sum()} != 1"
-    assert all(w >= -0.001 for w in weights), f"Negative weight found: {weights}"
+    if "cash_weight" in result:
+        assert abs(weights.sum() + float(result["cash_weight"]) - 1.0) < 1e-4, f"Weights + cash do not sum to 1"
+    else:
+        assert abs(weights.sum() - 1.0) < 1e-4, f"Weights sum {weights.sum()} != 1"
+    if result["model_name"] not in {"LeverageShortSelling", "LeverageBorrowing"}:
+        assert all(w >= -0.001 for w in weights), f"Negative weight found: {weights}"
     assert np.isfinite(result["expected_return"]), "expected_return is not finite"
     assert np.isfinite(result["expected_risk"]), "expected_risk is not finite"
     assert np.isfinite(result["sharpe_ratio"]), "sharpe_ratio is not finite"
@@ -66,6 +73,37 @@ def test_utility_maximization(synthetic_data):
     result = utility_maximization(mu, sigma, risk_aversion=1.5)
     assert result["model_name"] == "UtilityMaximization"
     assert_valid_portfolio(result, len(mu))
+
+
+def test_leverage_short_selling(synthetic_data):
+    tickers, mu, sigma = synthetic_data
+    result = leverage_short_selling(mu, sigma, risk_level=0.7, max_gross_exposure=1.4, max_short_exposure=0.3)
+    assert result["model_name"] == "LeverageShortSelling"
+    assert_valid_portfolio(result, len(mu))
+    assert np.min(result["weights"]) < 0
+
+
+def test_leverage_borrowing(synthetic_data):
+    tickers, mu, sigma = synthetic_data
+    result = leverage_borrowing(mu, sigma, risk_level=0.8, max_cash_borrow=0.2)
+    assert result["model_name"] == "LeverageBorrowing"
+    assert_valid_portfolio(result, len(mu))
+    assert "cash_weight" in result
+
+
+def test_turnover_constrained_mean_variance(synthetic_data):
+    tickers, mu, sigma = synthetic_data
+    current_weights = np.array([0.40, 0.25, 0.15, 0.10, 0.10])
+    result = turnover_constrained_mean_variance(
+        mu,
+        sigma,
+        current_weights=current_weights,
+        risk_level=0.5,
+        max_turnover=0.15,
+    )
+    assert result["model_name"] == "TurnoverConstrained"
+    assert_valid_portfolio(result, len(mu))
+    assert result["turnover"] <= 0.150001
 
 
 def test_max_sharpe_ratio(synthetic_data):
@@ -133,7 +171,18 @@ def test_run_all_models(synthetic_data, risk_tol):
     tickers, mu, sigma = synthetic_data
     results = run_all_models(mu, sigma, tickers=tickers, risk_tolerance_normalized=risk_tol)
 
-    expected_models = {"MinimumVariance", "MaximumReturn", "UtilityMaximization", "MaxSharpeRatio", "MeanVariance", "EqualWeight", "RiskParity"}
+    expected_models = {
+        "MinimumVariance",
+        "MaximumReturn",
+        "UtilityMaximization",
+        "LeverageShortSelling",
+        "LeverageBorrowing",
+        "TurnoverConstrained",
+        "MaxSharpeRatio",
+        "MeanVariance",
+        "EqualWeight",
+        "RiskParity",
+    }
     assert set(results.keys()) == expected_models, f"Missing models: {expected_models - set(results.keys())}"
 
     n = len(mu)

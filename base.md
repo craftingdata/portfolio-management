@@ -30,10 +30,11 @@ Current top-level structure:
 - `app/models/schemas.py`: request and response models
 - `app/services/data_service.py`: FMP data fetch, Azure Key Vault secret lookup, synthetic fallback, estimation entrypoint
 - `app/services/estimation.py`: return and covariance estimation plus FinanceToolkit risk diagnostics
-- `app/services/optimization.py`: six current portfolio models and `run_all_models`
-- `app/services/ranking.py`: heuristic applicability-based ranking
+- `app/services/optimization.py`: core Markowitz models plus utility, leverage, turnover, and `run_all_models`
+- `app/services/ranking.py`: output-aware applicability ranking with efficient-frontier context
 - `tests/test_api.py`: API tests
 - `tests/test_optimization.py`: optimization tests
+- `tests/test_ranking.py`: ranking tests
 - `tests/test_data_service.py`: FMP and Key Vault tests
 - `tests/test_estimation.py`: estimator tests
 - `README.md`: public project documentation
@@ -49,9 +50,10 @@ The current application behavior is:
 4. FMP historical prices are fetched and aligned.
 5. `estimate_market_inputs()` in `app/services/estimation.py` computes returns, annualized expected returns, and annualized covariance.
 6. FinanceToolkit risk diagnostics are collected only if an FMP API key is available.
-7. `run_all_models()` in `app/services/optimization.py` runs the six current portfolio constructors.
-8. `rank_portfolios()` in `app/services/ranking.py` ranks outputs using heuristic tables, not output-driven optimization metrics.
-9. The API returns ranked portfolios.
+7. `run_all_models()` in `app/services/optimization.py` runs the current portfolio constructors, including utility maximization, long-short leverage, borrowing/cash-sleeve leverage, and turnover-constrained rebalancing.
+8. `generate_efficient_frontier()` produces an efficient frontier from the current mean/covariance inputs.
+9. `rank_portfolios()` in `app/services/ranking.py` combines heuristic ordering with realized model outputs and frontier context.
+10. The API returns ranked portfolios plus the efficient frontier.
 
 ## Implemented Already
 
@@ -62,8 +64,13 @@ These items are complete and should be treated as the baseline, not reintroduced
 - Missing FMP credentials fail loudly.
 - FinanceToolkit is not constructed through a local no-key branch anymore.
 - Estimation currently computes annualized mean return and covariance from aligned price history.
+- Utility maximization is implemented alongside the existing core Markowitz models.
+- Efficient frontier generation is implemented and returned by the API.
+- Long-short leverage, borrowing/cash-sleeve leverage, and turnover-constrained optimization are implemented.
+- Ranking now uses realized portfolio outputs plus efficient-frontier context, not only static heuristics.
+- The API request model now includes leverage and turnover controls plus current weights for rebalance-aware optimization.
 - Synthetic data still exists, but only as a fallback for non-authentication FMP fetch failures.
-- Focused tests already cover FMP fetch behavior, Key Vault secret caching, estimator behavior, and API failure behavior when the FMP key is unavailable.
+- Tests now cover the optimizer models, ranking behavior, API responses, FMP fetch behavior, Key Vault secret caching, estimator behavior, and API failure behavior when the FMP key is unavailable.
 
 ## Non-Negotiable Rules
 
@@ -102,9 +109,9 @@ No package-management migration is needed. Continue using `uv`.
 The next model should be aware of these repo-specific realities:
 
 - `data_service.py` currently mixes provider concerns, cleaning, and estimation orchestration in one file.
-- `optimization.py` currently exposes one function per strategy plus `run_all_models()`. It is functional but not yet split into model-builder abstractions.
-- `ranking.py` is still heuristic-table driven and does not rank based on realized optimizer output quality.
-- The API request model is still minimal. It does not yet expose estimator selection, constraints, holdings, turnover, or transaction-cost inputs.
+- `optimization.py` currently exposes one function per strategy plus `run_all_models()`. It now includes utility, leverage, and turnover-aware models, but it is still not split into model-builder abstractions.
+- `ranking.py` now blends heuristic tables with realized optimizer output quality and frontier context.
+- The API request model now exposes leverage and turnover controls plus current weights, but it still does not expose estimator selection, factor data, sector metadata, or transaction-cost inputs.
 - Synthetic fallback still exists in `data_service.py`; it should be treated as test/degradation behavior, not as a preferred production path.
 - FinanceToolkit diagnostics are best-effort. The optimizer should not depend on FinanceToolkit outputs to function.
 
@@ -113,10 +120,10 @@ The next model should be aware of these repo-specific realities:
 The focused command that already passes after the latest changes is:
 
 ```bash
-uv run pytest tests/test_data_service.py tests/test_estimation.py tests/test_api.py -q
+uv run pytest tests -q
 ```
 
-Most recent verified result before this handoff: `18 passed`.
+Most recent verified result before this handoff: `34 passed`.
 
 General repo test command:
 
@@ -128,17 +135,13 @@ uv run pytest tests -q
 
 The repo is still missing major categories that appear in the Gurobi finance notebook collection:
 
-- efficient frontier generation
-- explicit utility maximization with risk-aversion parameterization
 - factor model formulations
 - sector and metadata-aware constraints
 - cardinality and minimum-buy constraints
 - round-lot constraints
-- leverage and cash-sleeve controls
-- turnover and rebalancing models
 - transaction-cost-aware optimization
 - market-impact approximations
-- output-driven result ranking
+- portfolio rebalancing with transaction costs
 
 ## Coverage Verification
 
@@ -152,6 +155,8 @@ What was missing before this update:
 - clear indication of which techniques are continuous versus mixed-integer
 
 After the additions below, `base.md` should be sufficient for another model to implement the techniques incrementally without first re-reading the Gurobi notebook index.
+
+Current coverage is better than the previous version of this handoff: the repo now has direct implementations and tests for the basic Markowitz family, efficient frontier generation, leverage variants, turnover-constrained rebalancing, and output-aware ranking.
 
 ## Source Of Truth And Retrieval Pointers
 
@@ -243,6 +248,10 @@ Current implemented optimizer techniques, based on repo code, are:
 
 - minimum variance
 - maximum return
+- utility maximization
+- leverage by short-selling
+- leverage by borrowing cash
+- turnover-constrained mean variance
 - max Sharpe ratio
 - mean variance
 - equal weight
@@ -250,11 +259,8 @@ Current implemented optimizer techniques, based on repo code, are:
 
 Current notable omissions, based on repo code, are:
 
-- explicit utility-maximization model
-- efficient frontier generation
 - factor-risk formulations
 - discrete constraint families
-- turnover-aware optimization
 - cost-aware optimization
 - market-impact modeling
 - metadata-driven sector constraints
@@ -304,12 +310,6 @@ Not all omissions are equal. Some features can be implemented immediately in sol
 
 These can be implemented now with the current repo structure and current data pipeline:
 
-- explicit utility maximization
-  - blocker type: missing solver logic only
-  - why not gated: current pipeline already provides `mu`, `sigma`, and long-only weights
-- efficient frontier generation
-  - blocker type: missing solver logic and response packaging only
-  - why not gated: frontier points can be generated from the existing `mu` and `sigma`
 - better continuous-model orchestration
   - blocker type: missing refactor only
   - why not gated: no new data source is needed
@@ -319,14 +319,11 @@ These can be implemented now with the current repo structure and current data pi
 These require solver work plus small schema or orchestration changes, but are not blocked by external data acquisition:
 
 - leverage by short-selling
-  - blocker type: missing solver logic plus schema updates for bounds and leverage controls
-  - why moderately gated: the math can be implemented now, but the request contract does not yet expose the needed controls
+  - blocker type: implemented in solver and schema; remaining work is hardening, calibration, and richer validation if the feature becomes user-facing
 - leverage by borrowing cash
-  - blocker type: missing solver logic plus schema updates
-  - why moderately gated: requires explicit cash sleeve or risk-free asset handling in request and response models
+  - blocker type: implemented in solver and schema; remaining work is hardening, calibration, and richer validation if the feature becomes user-facing
 - turnover limits
-  - blocker type: missing schema plus missing holdings input plus solver logic
-  - why moderately gated: the formulation is known, but current `OptimizeRequest` has no holdings or starting weights
+  - blocker type: implemented in solver and schema; remaining work is holdings validation and richer rebalance scenarios
 
 ### Heavily Gated By Missing Data Or Metadata
 
@@ -359,8 +356,8 @@ These require a broader addition across schema, orchestration, and solver layers
 ### Ranking Is Gated By Upstream Outputs
 
 - output-driven ranking
-  - blocker type: partially gated by upstream implementation
-  - why: ranking can be improved now, but its full value depends on richer optimizer outputs such as constraint satisfaction, turnover, cost, and solver diagnostics
+  - blocker type: partially improved and now implemented for current outputs
+  - why: ranking now uses realized returns, risk, Sharpe ratio, and frontier context, but it can still be extended further once transaction-cost and factor outputs exist
 
 ## Which Gates Can Be Removed By FMP Or FinanceToolkit
 
@@ -442,6 +439,10 @@ This section is the condensed planning view for another model.
 - solver-result packaging and ranking updates in `app/services/ranking.py`
 - end-to-end tests for any newly exposed feature
 
+Current status note:
+
+- some of the above are already partially addressed in the codebase, but the remaining major gaps are factor-model inputs, sector metadata, round-lot semantics, and transaction-cost/rebalancing calibration
+
 ### Practical Interpretation
 
 Using FMP and FinanceToolkit means the next model should not spend time building custom data collectors for sectors, quotes, benchmark rates, or standard risk metrics. The real remaining work shifts to:
@@ -456,13 +457,9 @@ Using FMP and FinanceToolkit means the next model should not spend time building
 Use this quick classification before starting any task:
 
 - implement now:
-  - utility maximization
-  - efficient frontier generation
   - continuous-model cleanup
 - implement after small schema additions:
-  - short-selling controls
-  - borrowing-cash controls
-  - turnover-limited models
+  - richer holdings validation for turnover and rebalancing variants
 - do not attempt as solver-only work:
   - sector allocation
   - factor models
@@ -800,6 +797,10 @@ These criteria are stricter than the high-level milestones and are intended to t
 - utility model exposes risk aversion explicitly
 - tests confirm feasibility and reasonable monotonic behavior
 
+Current repo status:
+
+- this family is implemented and covered by unit tests, including efficient frontier generation
+
 ### Factor Model Family Complete When
 
 - factor-implied covariance can be computed from fixtures
@@ -812,6 +813,10 @@ These criteria are stricter than the high-level milestones and are intended to t
 - solver enforces it
 - error path exists for unsupported relaxed solver combinations
 - tests verify the constraint materially changes the feasible set
+
+Current repo status:
+
+- leverage-by-short-selling, leverage-by-borrowing, and turnover-constrained optimization are implemented and covered by tests
 
 ### Transaction Cost Family Complete When
 
@@ -826,8 +831,9 @@ If another model is given only this file, the correct next implementation sequen
 
 1. refactor `app/services/data_service.py` into cleaner provider, cleaning, and metadata helpers without breaking `get_market_data()`
 2. extend `app/services/estimation.py` with explicit estimator configuration while preserving current defaults
-3. add utility maximization and efficient frontier generation in `app/services/optimization.py`
-4. add focused tests for those additions before moving on to factor models or MIP constraints
+3. add factor-model support with explicit factor exposures, factor covariance, and specific risk
+4. add sector metadata retrieval and sector-allocation constraints
+5. add transaction-cost and rebalancing formulations with explicit trade variables
 
 That sequence aligns directly to the Gurobi notebook progression: data prep first, basic Markowitz second, then richer formulations and constraints.
 
@@ -837,7 +843,7 @@ Implement in this order unless the user changes priorities:
 
 1. Provider abstraction and data pipeline cleanup
 2. Estimation pipeline hardening
-3. Base Markowitz parity and efficient frontier
+3. Base Markowitz parity already implemented; keep extending validation and documentation as needed
 4. Factor model support
 5. Portfolio constraint families
 6. Rebalancing and transaction costs

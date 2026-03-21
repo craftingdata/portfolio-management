@@ -10,6 +10,9 @@ MODEL_DESCRIPTIONS = {
     "MinimumVariance": "Minimizes portfolio variance (risk) subject to full investment constraint. Best for conservative investors.",
     "MaximumReturn": "Maximizes expected return subject to a risk budget. Best for aggressive investors.",
     "UtilityMaximization": "Maximizes expected utility using explicit risk aversion. Best for balanced investors.",
+    "LeverageShortSelling": "Long-short portfolio with explicit gross leverage and short exposure limits.",
+    "LeverageBorrowing": "Portfolio that can borrow cash through an explicit cash sleeve.",
+    "TurnoverConstrained": "Mean-variance optimization with turnover limits from the current portfolio.",
     "MaxSharpeRatio": "Maximizes risk-adjusted return (Sharpe ratio). Best for balanced risk/return.",
     "MeanVariance": "Classic Markowitz mean-variance optimization with target return. Best for moderate investors.",
     "EqualWeight": "Simple equal allocation to all assets. Robust baseline with no optimization.",
@@ -52,6 +55,11 @@ def optimize(request: OptimizeRequest):
             tickers=tickers,
             risk_tolerance_normalized=request.risk_tolerance,
             risk_free_rate=request.risk_free_rate,
+            max_gross_exposure=request.max_gross_exposure,
+            max_short_exposure=request.max_short_exposure,
+            max_cash_borrow=request.max_cash_borrow,
+            max_turnover=request.max_turnover,
+            current_weights=request.current_weights,
         )
         efficient_frontier = generate_efficient_frontier(
             mu=mu,

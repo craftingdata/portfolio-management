@@ -8,6 +8,11 @@ class OptimizeRequest(BaseModel):
     investment_horizon: Union[int, str] = Field(..., description='Months as int or "short"/"medium"/"long"')
     tickers: Optional[List[str]] = Field(None, description="Custom tickers list; defaults to diversified set")
     risk_free_rate: Optional[float] = Field(0.04, description="Annual risk-free rate (default 4%)")
+    max_gross_exposure: Optional[float] = Field(1.5, ge=1.0, description="Maximum gross exposure for long-short portfolios")
+    max_short_exposure: Optional[float] = Field(0.5, ge=0.0, description="Maximum absolute short exposure per asset")
+    max_cash_borrow: Optional[float] = Field(0.25, ge=0.0, description="Maximum borrowable cash sleeve as a fraction of portfolio value")
+    max_turnover: Optional[float] = Field(0.25, ge=0.0, description="Maximum total turnover relative to the starting portfolio")
+    current_weights: Optional[Dict[str, float]] = Field(None, description="Current portfolio weights keyed by ticker for turnover-aware optimization")
 
     @field_validator("risk_tolerance", mode="before")
     @classmethod

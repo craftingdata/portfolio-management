@@ -7,6 +7,9 @@ MODEL_DESCRIPTIONS_DEFAULT = {
     "MinimumVariance": "Minimizes portfolio variance (risk) subject to full investment constraint. Best for conservative investors.",
     "MaximumReturn": "Maximizes expected return subject to a risk budget. Best for aggressive investors.",
     "UtilityMaximization": "Maximizes expected utility using an explicit risk-aversion parameter. Best for balanced investors who want a single objective.",
+    "LeverageShortSelling": "Long-short portfolio with explicit gross leverage and short exposure limits. Best when shorting is allowed.",
+    "LeverageBorrowing": "Portfolio that can borrow cash to increase exposure while tracking a cash sleeve. Best when leverage is allowed.",
+    "TurnoverConstrained": "Mean-variance portfolio with explicit turnover limits from the current holdings. Best for rebalancing decisions.",
     "MaxSharpeRatio": "Maximizes risk-adjusted return (Sharpe ratio). Best for balanced risk/return.",
     "MeanVariance": "Classic Markowitz mean-variance optimization with target return. Best for moderate investors.",
     "EqualWeight": "Simple equal allocation to all assets. Robust baseline with no optimization.",
@@ -14,18 +17,21 @@ MODEL_DESCRIPTIONS_DEFAULT = {
 }
 
 BASE_ORDER = {
-    "low": ["MinimumVariance", "EqualWeight", "RiskParity", "UtilityMaximization", "MeanVariance", "MaxSharpeRatio", "MaximumReturn"],
-    "medium": ["MaxSharpeRatio", "UtilityMaximization", "MeanVariance", "RiskParity", "MinimumVariance", "EqualWeight", "MaximumReturn"],
-    "high": ["MaximumReturn", "UtilityMaximization", "MaxSharpeRatio", "MeanVariance", "RiskParity", "EqualWeight", "MinimumVariance"],
+    "low": ["MinimumVariance", "EqualWeight", "RiskParity", "TurnoverConstrained", "UtilityMaximization", "MeanVariance", "MaxSharpeRatio", "LeverageBorrowing", "LeverageShortSelling", "MaximumReturn"],
+    "medium": ["MaxSharpeRatio", "UtilityMaximization", "MeanVariance", "RiskParity", "TurnoverConstrained", "MinimumVariance", "EqualWeight", "LeverageBorrowing", "LeverageShortSelling", "MaximumReturn"],
+    "high": ["MaximumReturn", "LeverageBorrowing", "LeverageShortSelling", "UtilityMaximization", "MaxSharpeRatio", "MeanVariance", "RiskParity", "TurnoverConstrained", "EqualWeight", "MinimumVariance"],
 }
 
-BASE_SCORES = [100, 85, 70, 60, 45, 30, 15]
+BASE_SCORES = [100, 90, 80, 75, 65, 55, 45, 35, 25, 15]
 
 HORIZON_ADJUSTMENTS = {
     "MinimumVariance": {"short": +15, "long": -10},
     "EqualWeight": {"short": +10, "long": 0},
     "MaximumReturn": {"short": -15, "long": +15},
     "UtilityMaximization": {"short": -5, "long": +5},
+    "LeverageShortSelling": {"short": -10, "long": +10},
+    "LeverageBorrowing": {"short": -5, "long": +15},
+    "TurnoverConstrained": {"short": +5, "long": +5},
     "MaxSharpeRatio": {"short": -5, "long": +10},
     "MeanVariance": {"short": 0, "long": 0},
     "RiskParity": {"short": 0, "long": 0},
@@ -43,6 +49,15 @@ REASONING_TEMPLATES = {
     "UtilityMaximization": (
         "Maximizes expected utility with explicit risk aversion - adaptable for risk tolerance {rt}/10 "
         "and {h}-month horizon."
+    ),
+    "LeverageShortSelling": (
+        "Uses long-short exposure with gross leverage controls - suitable when shorting is allowed and {h}-month horizon supports active positioning."
+    ),
+    "LeverageBorrowing": (
+        "Uses an explicit cash sleeve to model borrowing and leveraged exposure - suited to {h}-month horizons where leverage is acceptable."
+    ),
+    "TurnoverConstrained": (
+        "Rebalances from the current portfolio while limiting turnover - useful for {h}-month horizons and practical trading constraints."
     ),
     "MaxSharpeRatio": (
         "Optimizes risk-adjusted returns (Sharpe ratio) - versatile approach for medium risk tolerance "
@@ -180,6 +195,9 @@ def rank_portfolios(
         weights_arr = result["weights"]
 
         weights_dict = {tickers[i]: float(weights_arr[i]) for i in range(len(tickers))}
+        cash_weight = result.get("cash_weight")
+        if cash_weight is not None:
+            weights_dict["CASH"] = float(cash_weight)
         allocation_dict = {t: float(w * total_amount) for t, w in weights_dict.items()}
 
         rt_display = round(risk_tolerance, 1)
